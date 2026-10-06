@@ -1,7 +1,7 @@
 ---
 created: 2026-09-09
-updated: 2026-10-04
-last_updated_session: authoring-run/286855f7-c7cb-43b6-ba19-419a20192f76
+updated: 2026-10-07
+last_updated_session: authoring-run/f32bed19-d6c1-45ed-bd7a-47b343a57b4b
 ---
 
 # Compose development startup
@@ -304,9 +304,16 @@ Kubernetes worker. Neither service receives the engine socket.
 The lifecycle imports the runtime and OpenShell images under engine-recorded
 names, including Podman's `localhost/` tags and Docker Hub's familiar names. For
 an omitted tag, `internal/occdev/kubernetes.go:engineImageReference` matches
-`:latest` and rejects missing or ambiguous matches. It then resolves the
-in-cluster digest and writes Installation configuration selecting Kubernetes
-Compute, Configuration, and Secret Drivers with native IAM; without OpenShell,
+`:latest` and rejects missing or ambiguous matches.
+`internal/occdev/kubernetes.go:importDevelopmentImage` exports Podman images
+through its CLI into an archive in owned `0700` state, then imports with
+`k3d image import --mode direct`, avoiding tools-container socket mounts.
+Deferred cleanup removes the archive, including on failure; cleanup errors fail
+startup. Source images remain. Docker retains tagged imports and digest
+staging/archive behavior.
+The lifecycle then resolves the in-cluster digest and writes Installation
+configuration selecting Kubernetes Compute, Configuration, and Secret Drivers
+with native IAM; without OpenShell,
 it adds both bundled Presets and the Codex Plugin Driver after the shared Codex
 sandbox check. Its runtime section sets the transport Secret prefix and gateway
 storage class that the current Compute Driver schema accepts, and memory limits
@@ -370,6 +377,8 @@ external key if a later OpenShell readiness step fails.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-07 04:08: Import tagged Podman development images through native export and direct archive streaming while retaining image identity and cleanup checks. (authoring-run/f32bed19-d6c1-45ed-bd7a-47b343a57b4b - d4173134f27d0961126b2df0f804ae90d1f3d7c0)
 
 - 2026-10-04 01:12: Pointed the API startup step at the existing composition function. (authoring-run/286855f7-c7cb-43b6-ba19-419a20192f76 - 7a8a64046ac8ef3e7b5a4ed46b1d4cef9f1573f3)
 
