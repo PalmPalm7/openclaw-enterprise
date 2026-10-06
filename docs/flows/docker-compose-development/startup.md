@@ -229,7 +229,10 @@ The loopback development proxy also terminates browser HTTPS using a private
 per-installation CA and a leaf limited to that installation's console and Agent
 hosts. The API and browser NodePorts publish only to host loopback. The CA private
 key stays in the private state directory; browser CA trust is an explicit
-operator action.
+operator action. `internal/occdev/openshell_k3d.go:upK3d` prints that required
+step beside the browser URL and public CA path, linking the
+[trust and certificate-error procedure](../../guides/operate/troubleshooting.md#the-local-console-reports-a-certificate-error).
+Stack readiness does not mean the browser trusts the local CA.
 
 ### 12. Select Kubernetes development and preserve cleanup ownership
 
