@@ -218,6 +218,11 @@ credentials. Mismatches prevent candidate activation; database read failures
 use normal retries. The account-owned token/workspace Secret is delivered only
 to its compatible dedicated Codex workload.
 
+The ChatGPT client cancels unused HTTP error bodies and responses declared
+larger than its 4 MiB allowance before reporting a sanitized failure. Cancelling
+releases occupied transport capacity without reading the discarded body. This cleanup adds
+no automatic retries or provider-effect guarantees.
+
 ## Startup identity and safe Backend changes
 
 Startup validates configuration and required dependencies, without scanning

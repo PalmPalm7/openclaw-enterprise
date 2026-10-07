@@ -821,6 +821,10 @@
                         "label": "CI"
                       },
                       {
+                        "page": "testing/ci-k3d-images",
+                        "label": "k3d Images"
+                      },
+                      {
                         "page": "testing/first-agent-smoke",
                         "label": "First Agent Smoke"
                       },

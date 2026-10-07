@@ -1,4 +1,6 @@
 ---
+author: kevinlin-openai
+implementation_status: Implemented
 status: Accepted
 ---
 

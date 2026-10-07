@@ -1143,6 +1143,38 @@ function failure(error: unknown): "retryable" | "permanent" {
     : "retryable";
 }
 
+const MAX_NAMESPACE_FAILURE_REASON_LENGTH = 256;
+
+/**
+ * The operator reason for a failed Namespace ensure. Only this Driver's own refusal texts
+ * pass through: they name this Namespace's own ID and Kubernetes placement, and a foreign
+ * marker or object only by its key or kind. Anything else (Kubernetes response bodies,
+ * lifecycle hooks, the Sandbox Driver) gets a fixed text, so no response text and no
+ * value of another tenant reaches the worker log. GatewaySettingFailure names settings the
+ * caller submitted, so it never passes through. Characters the worker log refuses become
+ * `_`, so the log keeps the reason instead of dropping it.
+ */
+function namespaceFailureReason(error: unknown): string {
+  if (
+    (error instanceof OwnershipFailure ||
+      error instanceof ConfigurationFailure ||
+      error instanceof KubernetesRequestTimeout) &&
+    !(error instanceof GatewaySettingFailure)
+  ) {
+    const cleaned = error.message.replace(/[^A-Za-z0-9._: /@-]/gu, "_");
+    return cleaned.length <= MAX_NAMESPACE_FAILURE_REASON_LENGTH
+      ? cleaned
+      : `${cleaned.slice(0, MAX_NAMESPACE_FAILURE_REASON_LENGTH - 3)}...`;
+  }
+  if (error instanceof KubernetesApiUnavailableError || unreachableSocketFailure(error)) {
+    return "The Kubernetes API server is unreachable.";
+  }
+  const status = numericErrorStatus(error);
+  return status === undefined
+    ? "Namespace preparation failed."
+    : `A Namespace preparation request failed with HTTP status ${status}.`;
+}
+
 function validatePort(value: number, description: string): void {
   if (!Number.isInteger(value) || value < 1 || value > 65_535) {
     throw new ConfigurationFailure(`${description} must be a valid port.`);
@@ -1683,6 +1715,9 @@ function harnessModels(configuration: OpenClawConfigurationDocument): readonly s
   return [...new Set(models as string[])];
 }
 
+// The error contract caps the message a ConfigurationHarnessError becomes.
+const HARNESS_MESSAGE_CAP = 256;
+
 // A dedicated Codex Gateway entrypoint rewrites these settings at every start
 // (excludeGatewayLocalCodexTools, pinCodexProviderTransport) and refuses to start
 // on a shape it cannot rewrite. Reject those shapes here, before a deployment
@@ -1690,10 +1725,21 @@ function harnessModels(configuration: OpenClawConfigurationDocument): readonly s
 // are replaced at start, so they are accepted. The caller owns this Configuration,
 // so the error names the setting path and admission returns it as invalid content.
 function requireCodexGatewayConfigurationShape(configuration: OpenClawConfigurationDocument): void {
+  const message = (path: string, shape: string) =>
+    `Configuration setting ${path} must be ${shape}: a dedicated Codex Gateway cannot apply it otherwise.`;
   const unsupported = (path: string, shape: string) =>
-    new ConfigurationHarnessError(
-      `Configuration setting ${path} must be ${shape}: a dedicated Codex Gateway cannot apply it otherwise.`,
-    );
+    new ConfigurationHarnessError(message(path, shape));
+  // A provider key is submitted and can be any length. Cut it (by whole characters, ending
+  // in "…") so the message fits the 256-character error cap with its wording whole, as
+  // contract messages cut long paths (configurationFieldMessage in occ's errors.ts cuts a
+  // whole setting path the same way).
+  const unsupportedProvider = (key: string, rest: string, shape: string) => {
+    const room =
+      HARNESS_MESSAGE_CAP - Array.from(message(`models.providers.${rest}`, shape)).length;
+    const characters = Array.from(key);
+    const shown = characters.length <= room ? key : `${characters.slice(0, room - 1).join("")}…`;
+    return unsupported(`models.providers.${shown}${rest}`, shape);
+  };
   const object = (value: unknown, path: string): Record<string, unknown> | undefined => {
     if (value === undefined || value === null) {
       return undefined;
@@ -1721,13 +1767,13 @@ function requireCodexGatewayConfigurationShape(configuration: OpenClawConfigurat
     }
     const row = asRecord(provider);
     if (row === undefined) {
-      throw unsupported(`models.providers.${key}`, "an object");
+      throw unsupportedProvider(key, "", "an object");
     }
     if (
       row.models !== undefined &&
       (!Array.isArray(row.models) || !row.models.every((model) => asRecord(model) !== undefined))
     ) {
-      throw unsupported(`models.providers.${key}.models`, "a list of objects");
+      throw unsupportedProvider(key, ".models", "a list of objects");
     }
   }
 }
@@ -3472,7 +3518,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       if (tenantAccessRequired && numericErrorStatus(error) === 403) {
         return result;
       }
-      return { ...result, failure: failure(error) };
+      return { ...result, failure: failure(error), reason: namespaceFailureReason(error) };
     }
   }
 
@@ -6692,13 +6738,17 @@ export class KubernetesComputeDriver implements ComputeDriver {
     const existingLabel = labels["openclaw.dev/namespace"];
     const existingId = annotations["openclaw.dev/namespace-id"];
     const storageOwner = labels["openclaw.dev/gateway-namespace"];
-    if (
-      (existingLabel !== undefined && existingLabel !== ownership.namespaceId) ||
-      (existingId !== undefined && existingId !== ownership.namespaceId) ||
-      (storageOwner !== undefined && storageOwner !== ownership.namespaceId)
-    ) {
+    // Name the marker that blocks adoption, never its value: that is another tenant's ID.
+    const foreignMarker = (
+      [
+        ["label", "openclaw.dev/namespace", existingLabel],
+        ["annotation", "openclaw.dev/namespace-id", existingId],
+        ["label", "openclaw.dev/gateway-namespace", storageOwner],
+      ] as const
+    ).find(([, , value]) => value !== undefined && value !== ownership.namespaceId);
+    if (foreignMarker !== undefined) {
       throw new OwnershipFailure(
-        `Existing Kubernetes namespace ${namespace.metadata.name} belongs to another tenant.`,
+        `Existing Kubernetes namespace ${namespace.metadata.name} belongs to another tenant: its ${foreignMarker[1]} ${foreignMarker[0]} names a different Namespace.`,
       );
     }
     const requiredLabels = {
@@ -6841,15 +6891,25 @@ export class KubernetesComputeDriver implements ComputeDriver {
           `The existing Kubernetes namespace ${namespace.name} returned an invalid NetworkPolicy.`,
         );
       }
-      this.verifyOwnership(
-        {
-          ...policy,
-          apiVersion: typeof policy.apiVersion === "string" ? policy.apiVersion : "v1",
-          kind: "NetworkPolicy",
-          metadata: { ...metadata, name: metadata.name },
-        } as ManagedKubernetesObject<"NetworkPolicy">,
-        ownership,
-      );
+      try {
+        this.verifyOwnership(
+          {
+            ...policy,
+            apiVersion: typeof policy.apiVersion === "string" ? policy.apiVersion : "v1",
+            kind: "NetworkPolicy",
+            metadata: { ...metadata, name: metadata.name },
+          } as ManagedKubernetesObject<"NetworkPolicy">,
+          ownership,
+        );
+      } catch (error) {
+        // A policy left by another tenant is named after that tenant's Agents: omit its name.
+        if (error instanceof OwnershipFailure) {
+          throw new OwnershipFailure(
+            `The existing Kubernetes namespace ${namespace.name} has a NetworkPolicy that this Namespace does not own.`,
+          );
+        }
+        throw error;
+      }
     }
   }
 

@@ -1,4 +1,6 @@
 ---
+author: freeqaz-openai
+implementation_status: Partially implemented
 status: Unspecified
 status_note: "The record describes implementation and amendments but does not state an RFC acceptance decision."
 ---

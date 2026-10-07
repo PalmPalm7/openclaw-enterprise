@@ -1,4 +1,6 @@
 ---
+author: freeqaz-openai
+implementation_status: Implemented
 status: Unspecified
 status_note: "The record selects interface refinements and records implementation but does not state an RFC acceptance decision."
 ---

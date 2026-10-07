@@ -375,6 +375,21 @@ function gatewayRefusedAuthentication(gatewayRuntime, error) {
   );
 }
 
+// The Gateway resolves its loaded channel plugins plus manifest plugins for the channels the
+// Configuration sets up, so channels.status for a channel the Agent does not use is refused
+// as INVALID_REQUEST "unknown channel: <id>" (src/gateway/server-methods/channels.ts in the
+// pinned OpenClaw). A configured channel whose plugin failed to load still resolves and takes
+// the status path.
+function gatewayRefusedUnknownChannel(gatewayRuntime, error, channel) {
+  return (
+    typeof channel === "string" &&
+    typeof gatewayRuntime?.isGatewayClientRequestError === "function" &&
+    gatewayRuntime.isGatewayClientRequestError(error) === true &&
+    error.gatewayCode === "INVALID_REQUEST" &&
+    error.message === "unknown channel: " + channel
+  );
+}
+
 // Query the running Gateway through OpenClaw's public SDK. Starting a CLI here
 // also starts its launcher/respawn lifecycle; killing that launcher cannot bound
 // a probe whose descendant still owns stdout.
@@ -422,12 +437,23 @@ function callNativeGateway(method, params, timeoutMs, abortSignal, maxBytes = 65
       finish({
         ok: false,
         code: "PROBE_FAILED",
+        ...(gatewayRefusedUnknownChannel(gatewayRuntime, error, params?.channel) ? { unknownChannel: true } : {}),
         ...(gatewayRefusedAuthentication(gatewayRuntime, error)
           ? { authenticationRefused: true, authenticationRefusalReason: gatewayAuthRefusalReason(error) }
           : {}),
       });
     });
   });
+}
+
+// No Slack channel: the expected answer for an Agent that does not use Slack, so nothing
+// past configuration was checked.
+function notConfiguredSlackChecks(checkedAt) {
+  return [
+    runtimeDiagnosticCheck("configuration", "failed", checkedAt, "NOT_CONFIGURED"),
+    runtimeDiagnosticCheck("authentication", "unknown", checkedAt),
+    runtimeDiagnosticCheck("connectivity", "unknown", checkedAt),
+  ];
 }
 
 function unknownSlackChecks(checkedAt, code) {
@@ -514,13 +540,7 @@ function slackChecksFromStatusPayload(payload, checkedAt) {
       : typeof account.configured === "boolean"
         ? account.configured
         : undefined;
-  if (configured === false) {
-    return [
-      runtimeDiagnosticCheck("configuration", "failed", checkedAt, "NOT_CONFIGURED"),
-      runtimeDiagnosticCheck("authentication", "unknown", checkedAt),
-      runtimeDiagnosticCheck("connectivity", "unknown", checkedAt),
-    ];
-  }
+  if (configured === false) return notConfiguredSlackChecks(checkedAt);
   const probe = isPlainObject(account.probe) ? account.probe : undefined;
   const connected =
     typeof channelSummary.connected === "boolean"
@@ -543,7 +563,11 @@ async function slackChannelDiagnosticChecks(checkedAt, abortSignal) {
     6000,
     abortSignal,
   );
-  if (!result.ok) return unknownSlackChecks(checkedAt, result.code);
+  if (!result.ok) {
+    return result.unknownChannel === true
+      ? notConfiguredSlackChecks(checkedAt)
+      : unknownSlackChecks(checkedAt, result.code);
+  }
   return slackChecksFromStatusPayload(result.value, checkedAt);
 }
 

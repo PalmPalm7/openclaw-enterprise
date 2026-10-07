@@ -1,4 +1,6 @@
 ---
+author: stevenlee-oai
+implementation_status: Partially implemented
 status: Proposed
 ---
 

@@ -1,4 +1,6 @@
 ---
+author: kevinlin-openai
+implementation_status: Partially implemented
 status: Proposed
 status_note: "The incremental implementation is under review; the broader recovery design remains proposed."
 ---

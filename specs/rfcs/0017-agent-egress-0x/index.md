@@ -1,4 +1,6 @@
 ---
+author: freeqaz-openai
+implementation_status: Partially implemented
 status: Unspecified
 status_note: "The record gives the 0.x direction; explicit acceptance applies to the earlier custom proxy, not this replacement direction."
 ---

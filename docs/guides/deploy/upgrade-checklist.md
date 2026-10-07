@@ -8,9 +8,7 @@ The checklist complements the
 [production image upgrade procedure](production-upgrade.md) and the
 [persistent local k3d procedure](local-k3d-image-upgrade.md). A custom retained
 Compose or Compose-and-k3d environment has no supported in-place upgrade
-command. Use this page as its migration inventory, retain its named volumes,
-cluster, and private state directory, and maintain a reviewed procedure for its
-own topology.
+command; use this page as its migration inventory.
 
 ## Classify the release
 
@@ -28,14 +26,19 @@ own topology.
       drop the four `devday*.json` files. The helper refuses Installation
       changes other than the Plugin Driver, so remove those entries and restart
       first; saved Presets stay.
-      After the upgrade, you can add `/app/deploy/presets/swe-preset.json`
-      (the former `devday.json`).
+      You can add `/app/deploy/presets/swe-preset.json` (formerly
+      `devday.json`) afterward.
 - [ ] On a single-cluster install, run
       `kubectl get namespaces -l openclaw.dev/gateway-namespace -L openclaw.dev/namespace`.
       Releases with the shared tenant namespace refuse to start while a row has
       an empty `NAMESPACE` column (a
       [split-layout tenant](../../reference/drivers/kubernetes-compute.md#existing-split-layout-installations));
       the image helper's preflight stops before quiescence.
+- [ ] Before the window, render the candidate chart with your live values
+      (`helm template`): releases after 2026-10-05
+      [refuse some values](production-upgrade-recovery.md#correct-values-newer-releases-refuse)
+      older ones accepted. The image helper renders again and runs its startup
+      preflight before stopping anything.
 - [ ] Decide whether this is a controller-only, runtime-only, or coordinated
       release. A controller-only release does not request Agent deployments; a
       worker restart can still interrupt repository-bound revisions. A runtime
@@ -99,9 +102,6 @@ Create a private evidence directory and record these values before mutation.
       grants. Stop if that recovery cannot be performed safely.
 
 ## Assign every surface a disposition
-
-Do not treat “the image was replaced” as evidence that these other surfaces
-changed.
 
 | Surface                                                           | Disposition                                         | Upgrade behavior                                                                                                                                                                                                                                                                                                               | Required operator action                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | ----------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

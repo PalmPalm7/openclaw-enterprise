@@ -269,9 +269,13 @@ environment, mounts and service account), with the candidate Installation in a
 temporary Secret and the chart's API and worker dependency egress in a temporary
 NetworkPolicy. Each loads the Installation, Drivers and `presets.files`, then
 runs the bundled Kubernetes Compute Driver's preflight as startup does, without
-opening the database. If either fails, as when a listed Preset file is missing
-from the image or split-layout tenants remain, the command prints each failure,
-deletes these resources, and stops; the old release keeps serving. Logs and
+opening the database. Each then checks the stored Installation name, which the
+command reads through OCC, against the image's Name rule. If either fails, as
+when a listed Preset file is missing from the image, split-layout tenants remain
+or the name
+[breaks the rule](production-upgrade-recovery.md#correct-an-invalid-installation-name),
+the command prints each failure, deletes these resources, and stops; the old
+release keeps serving. Logs and
 status are saved as `preflight-<api|worker>.log` and `-status.json`, taking up
 to about 90 seconds past `--timeout-seconds`. Runtime upgrades use the current
 controller image. If the helper is killed, delete its leftovers with

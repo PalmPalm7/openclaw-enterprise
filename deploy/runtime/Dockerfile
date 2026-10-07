@@ -2,7 +2,10 @@ ARG OPENCLAW_COMMIT=11d3d04a1279781a770f6a6aa09e6322b064b80a
 ARG NODE_BASE_IMAGE=docker.io/library/node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
 ARG NODE_RUNTIME_BASE_IMAGE=docker.io/library/node:24-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03
 
-FROM ${NODE_BASE_IMAGE} AS repository-client-build
+# The credential client build needs only Node and pnpm. The slim runtime base
+# is already in the final image, so a CI build whose controller sources changed
+# does not also fetch the full build base from the layer cache.
+FROM ${NODE_RUNTIME_BASE_IMAGE} AS repository-client-build
 
 WORKDIR /build
 COPY LICENSE package.json pnpm-lock.yaml pnpm-workspace.yaml ./
