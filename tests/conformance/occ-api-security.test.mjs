@@ -1790,6 +1790,30 @@ test("contract error details stay within the published path cap and name what a 
     ),
     severalMessage,
   );
+  // Paths that exactly fill the cap stay whole.
+  const exact = await request(fixture.app, agents, {
+    body: { ...agent, harnessAuth: { method: "x", ["Q".repeat(63)]: 1 } },
+  });
+  assert.equal(
+    exact.payload.error.message,
+    `${contract} /harnessAuth/${"Q".repeat(63)} is not an accepted field;` +
+      " body /harnessAuth/source is required; body /harnessAuth/serviceAccountId is required;" +
+      " and 3 more.",
+  );
+  assert.equal(Array.from(exact.payload.error.message).length, 256);
+  // The cap counts characters, not UTF-16 code units: an astral key that fits stays whole,
+  // and a cut keeps whole characters.
+  const room = 256 - `${contract} / is not an accepted field.`.length;
+  for (const [count, shown] of [
+    [150, "\u{1F600}".repeat(150)],
+    [200, `${"\u{1F600}".repeat(room - 1)}…`],
+  ]) {
+    const astral = await request(fixture.app, agents, {
+      body: { ...agent, ["\u{1F600}".repeat(count)]: 1 },
+    });
+    assert.equal(astral.response.status, 400);
+    assert.equal(astral.payload.error.message, `${contract} /${shown} is not an accepted field.`);
+  }
 
   // A union whose shapes all accept one type names that type, not "one of" a single entry.
   const wholeBody = await request(

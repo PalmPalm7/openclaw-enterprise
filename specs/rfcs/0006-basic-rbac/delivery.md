@@ -7,7 +7,7 @@ rfc: index.md
 Read the [current-source and release-scope amendment](index.md#current-source-amendment--2026-09-24)
 before applying this original proposal. This plan is deferred past 0.x; the
 requirements below are not implementation acceptance. The 0.x scope is
-[Agent access](../36-agent-access.md#delivery-checkpoints) checkpoints 1-2.
+[Agent access](../0010-agent-access.md#delivery-checkpoints) checkpoints 1-2.
 
 **Post-0.x.** The [selected proposal](index.md) is complete only when
 ordinary people can use personal and team Agents through both channels with the
@@ -17,7 +17,7 @@ scope.
 
 ## Increments and qualification
 
-Increments 2-4 are post-0.x. Increment 1 overlaps the 0.x [Agent access](../36-agent-access.md#delivery-checkpoints) checkpoints, which govern where they differ.
+Increments 2-4 are post-0.x. Increment 1 overlaps the 0.x [Agent access](../0010-agent-access.md#delivery-checkpoints) checkpoints, which govern where they differ.
 
 1. **Account/policy foundation.** Through the real controller and limited-role
    PostgreSQL path, an administrator enrolls a human without grants, applies exact

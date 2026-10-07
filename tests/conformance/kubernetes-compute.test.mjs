@@ -2714,6 +2714,11 @@ test("explicit existing namespace adoption claims tenant identity only after sec
 
   const duplicateClaim = await run({ claims: [{ metadata: { name: "another-namespace" } }] });
   assert.equal(duplicateClaim.result.failure, "permanent");
+  // The competing Kubernetes namespace stays unnamed; the tenant ID is this Namespace's own.
+  assert.equal(
+    duplicateClaim.result.reason,
+    `Another Kubernetes namespace already claims tenant ${tenant.id}.`,
+  );
   assert.deepEqual(duplicateClaim.patches, []);
 
   const implicitlyClaimedNamespace = prepared();
@@ -2724,38 +2729,72 @@ test("explicit existing namespace adoption claims tenant identity only after sec
     namespaceId: tenant.id,
     namespaceReady: false,
     failure: "permanent",
+    reason: "Existing Kubernetes namespace customer-support was not explicitly selected.",
   });
   assert.deepEqual(implicitAdoption.patches, []);
 
-  for (const mutate of [
-    null,
-    (namespace) => delete namespace.metadata.annotations["openclaw.dev/namespace-lifecycle"],
-    (namespace) => (namespace.metadata.labels["pod-security.kubernetes.io/enforce"] = "baseline"),
-    (namespace) => (namespace.metadata.labels["openclaw.dev/namespace"] = "other-tenant"),
-    (namespace) => (namespace.metadata.labels["openclaw.dev/gateway-namespace"] = "other-tenant"),
-    (namespace) => (namespace.metadata.annotations["openclaw.dev/namespace-id"] = "ns_other"),
-    (namespace) => (namespace.status.phase = "Terminating"),
-    (namespace) => (namespace.metadata.deletionTimestamp = "2026-08-26T00:00:00.000Z"),
-    (namespace) => delete namespace.metadata.resourceVersion,
+  // Each refusal carries its reason for the worker log. A foreign tenant marker is named by
+  // its key; its value, another tenant's ID, never appears.
+  const existing = "Existing Kubernetes namespace customer-support";
+  for (const [mutate, reason] of [
+    [null, `${existing} does not exist.`],
+    [
+      (namespace) => delete namespace.metadata.annotations["openclaw.dev/namespace-lifecycle"],
+      `${existing} requires external ownership.`,
+    ],
+    [
+      (namespace) => (namespace.metadata.labels["pod-security.kubernetes.io/enforce"] = "baseline"),
+      `${existing} requires restricted Pod Security.`,
+    ],
+    [
+      (namespace) => (namespace.metadata.labels["openclaw.dev/namespace"] = "other-tenant"),
+      `${existing} belongs to another tenant: its openclaw.dev/namespace label names a different Namespace.`,
+    ],
+    [
+      (namespace) => (namespace.metadata.labels["openclaw.dev/gateway-namespace"] = "other-tenant"),
+      `${existing} belongs to another tenant: its openclaw.dev/gateway-namespace label names a different Namespace.`,
+    ],
+    [
+      (namespace) => (namespace.metadata.annotations["openclaw.dev/namespace-id"] = "ns_other"),
+      `${existing} belongs to another tenant: its openclaw.dev/namespace-id annotation names a different Namespace.`,
+    ],
+    [(namespace) => (namespace.status.phase = "Terminating"), `${existing} must be active.`],
+    [
+      (namespace) => (namespace.metadata.deletionTimestamp = "2026-08-26T00:00:00.000Z"),
+      `${existing} must be active.`,
+    ],
+    [
+      (namespace) => delete namespace.metadata.resourceVersion,
+      `${existing} requires a resource version.`,
+    ],
   ]) {
     const rejected = await run({ mutate });
     assert.deepEqual(rejected.result, {
       namespaceId: tenant.id,
       namespaceReady: false,
       failure: "permanent",
+      reason,
     });
     assert.deepEqual(rejected.patches, []);
   }
 
+  // A NetworkPolicy left by another tenant is named after that tenant's Agents: the reason
+  // omits its name.
   const foreignPolicies = await run({
     policies: [
       {
         kind: "NetworkPolicy",
-        metadata: { name: "foreign", namespace: selection.existingNamespace },
+        metadata: { name: "allow-agent-auth-0123456789ab", namespace: selection.existingNamespace },
       },
     ],
   });
-  assert.equal(foreignPolicies.result.failure, "permanent");
+  assert.deepEqual(foreignPolicies.result, {
+    namespaceId: tenant.id,
+    namespaceReady: false,
+    failure: "permanent",
+    reason:
+      "The existing Kubernetes namespace customer-support has a NetworkPolicy that this Namespace does not own.",
+  });
   assert.deepEqual(foreignPolicies.patches, []);
 
   const inaccessible = await run({ forbiddenPolicies: true });
@@ -2769,6 +2808,10 @@ test("explicit existing namespace adoption claims tenant identity only after sec
     },
   });
   assert.equal(competingTenant.result.failure, "permanent");
+  assert.equal(
+    competingTenant.result.reason,
+    `${existing} belongs to another tenant: its openclaw.dev/namespace label names a different Namespace.`,
+  );
   assert.equal(competingTenant.patches.length, 1);
 
   const sameTenant = await run({
@@ -2780,6 +2823,74 @@ test("explicit existing namespace adoption claims tenant identity only after sec
   });
   assert.deepEqual(sameTenant.result, { namespaceId: tenant.id, namespaceReady: false });
   assert.equal(sameTenant.patches.length, 1);
+});
+
+// The worker logs a failed ensure's reason, so the reason never carries response text and stays
+// loggable: other failures map to fixed texts, and the Driver's own refusals are cleaned and cut.
+test("a failed Namespace ensure reports a fixed or cleaned, bounded reason", async (t) => {
+  const { KubernetesApiUnavailableError } =
+    await import("../../apps/controller/src/drivers/kubernetes/client.ts");
+  const selection = { ...tenant, status: "provisioning", existingNamespace: "customer-support" };
+  const ensure = (readNamespace, namespace = selection) => {
+    const driver = createKubernetesComputeDriver(options());
+    driver.waitBeforeRetry = async () => {};
+    driver.apiClients = Promise.resolve({ core: { readNamespace } });
+    driver.executionApiClients = driver.apiClients;
+    return driver.ensureNamespace(namespace);
+  };
+  const failed = (failure, reason) => ({
+    namespaceId: tenant.id,
+    namespaceReady: false,
+    failure,
+    reason,
+  });
+  const unreachable = "The Kubernetes API server is unreachable.";
+  for (const [error, failure, reason] of [
+    [new KubernetesApiUnavailableError("https://192.0.2.1:6443"), "retryable", unreachable],
+    [
+      new TypeError("fetch failed", {
+        cause: Object.assign(new Error("connect ECONNREFUSED 192.0.2.1:6443"), {
+          code: "ECONNREFUSED",
+        }),
+      }),
+      "retryable",
+      unreachable,
+    ],
+    [
+      Object.assign(new Error('namespaces "other-tenant" is invalid'), { statusCode: 422 }),
+      "permanent",
+      "A Namespace preparation request failed with HTTP status 422.",
+    ],
+  ]) {
+    assert.deepEqual(
+      await ensure(async () => {
+        throw error;
+      }),
+      failed(failure, reason),
+    );
+  }
+  // request() makes its deadline right before the read, which lets it lapse in flight.
+  let deadline;
+  const timeout = t.mock.method(AbortSignal, "timeout", () => {
+    deadline = new AbortController();
+    return deadline.signal;
+  });
+  const timedOut = await ensure(async () => {
+    deadline.abort(new DOMException("The operation timed out.", "TimeoutError"));
+    throw deadline.signal.reason;
+  });
+  timeout.mock.restore();
+  assert.deepEqual(timedOut, failed("retryable", "Kubernetes API request timed out."));
+  // A refusal's characters the worker log refuses become "_", and a long one is cut to 256.
+  const missing = await ensure(
+    async () => {
+      throw Object.assign(new Error("not found"), { statusCode: 404 });
+    },
+    { ...selection, existingNamespace: `customer-support,${"x".repeat(260)}` },
+  );
+  const shown = `Existing Kubernetes namespace customer-support_${"x".repeat(206)}...`;
+  assert.equal(shown.length, 256);
+  assert.deepEqual(missing, failed("permanent", shown));
 });
 
 test("dedicated Agent shared claims retain ownership inside an existing tenant namespace", () => {
@@ -4586,6 +4697,50 @@ test("dedicated Codex admission rejects settings its Gateway entrypoint cannot r
           `Configuration setting ${message}: a dedicated Codex Gateway cannot apply it otherwise.`,
     );
   }
+  // A long submitted provider key (matched trimmed, so padded with whitespace) is cut, with
+  // "…", so the message fits the 256-character error cap and keeps the rule wording
+  // (finding 664).
+  const wording = ": a dedicated Codex Gateway cannot apply it otherwise.";
+  for (const [providers, start, rule] of [
+    [{ [`${" ".repeat(300)}openai`]: "stub" }, " ".repeat(8), " must be an object"],
+    [
+      { [`Codex${"\u3000".repeat(400)}`]: { models: {} } },
+      `Codex${"\u3000".repeat(8)}`,
+      ".models must be a list of objects",
+    ],
+  ]) {
+    assert.throws(
+      () => driver.validateHarnessAuth(codex, oauth, { ...base, models: { providers } }),
+      (error) => {
+        assert.ok(error instanceof ConfigurationHarnessError);
+        assert.equal(Array.from(error.message).length, 256, error.message);
+        assert.ok(error.message.startsWith(`Configuration setting models.providers.${start}`));
+        assert.ok(error.message.endsWith(`…${rule}${wording}`), error.message);
+        return true;
+      },
+    );
+  }
+  // A key that exactly fills the cap stays whole; one character more is cut.
+  const room = 256 - `Configuration setting models.providers. must be an object${wording}`.length;
+  const padded = `${" ".repeat(room - 6)}OpenAI`;
+  assert.throws(
+    () =>
+      driver.validateHarnessAuth(codex, oauth, {
+        ...base,
+        models: { providers: { [padded]: "stub" } },
+      }),
+    { message: `Configuration setting models.providers.${padded} must be an object${wording}` },
+  );
+  assert.throws(
+    () =>
+      driver.validateHarnessAuth(codex, oauth, {
+        ...base,
+        models: { providers: { [` ${padded}`]: "stub" } },
+      }),
+    {
+      message: `Configuration setting models.providers.${" ".repeat(room - 5)}Open… must be an object${wording}`,
+    },
+  );
 });
 
 test("credential-source authentication renders no model Secret and requires the paired gateway", () => {
@@ -6973,6 +7128,7 @@ test("production drivers reject injected clients and fail closed without their k
     namespaceId: tenant.id,
     namespaceReady: false,
     failure: "retryable",
+    reason: "Namespace preparation failed.",
   });
 });
 
@@ -7066,11 +7222,12 @@ test("Kubernetes lifecycle hooks never run before cluster ownership and workload
   // Hooks cannot prepare or revoke tenant infrastructure until its cluster ownership is verified.
   const namespacePreparation = await driver.ensureNamespace(tenant);
   assert.deepEqual(
-    { ...namespacePreparation, failure: undefined },
+    { ...namespacePreparation, failure: undefined, reason: undefined },
     {
       namespaceId: tenant.id,
       namespaceReady: false,
       failure: undefined,
+      reason: undefined,
     },
   );
   assert.match(namespacePreparation.failure, /^(?:permanent|retryable)$/);
@@ -7259,15 +7416,19 @@ test("the official Kubernetes client rejects ambiguous identity and insecure API
     // Unsafe cluster configuration is permanently rejected before contacting its API server.
     // An unrefused fixture fails later at the unreachable port, which is retryable, so
     // `permanent` is what proves the validator refused it.
+    const refused = await driver.ensureNamespace(tenant);
     assert.deepEqual(
-      await driver.ensureNamespace(tenant),
+      { ...refused, reason: undefined },
       {
         namespaceId: tenant.id,
         namespaceReady: false,
         failure: "permanent",
+        reason: undefined,
       },
       scenario.name,
     );
+    // The refusal names the kubeconfig check, not the generic fallback.
+    assert.match(refused.reason, /kube/i, scenario.name);
   }
 
   // The safe kubeconfig these scenarios depart from passes validation and fails only at the
@@ -7286,6 +7447,7 @@ test("the official Kubernetes client rejects ambiguous identity and insecure API
     namespaceId: tenant.id,
     namespaceReady: false,
     failure: "retryable",
+    reason: "Namespace preparation failed.",
   });
 });
 

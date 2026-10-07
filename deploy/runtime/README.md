@@ -63,6 +63,8 @@ normalization. The final stage copies the assembled
 directory directly, without an intermediate compressed archive. Its pinned
 `node:24-bookworm-slim` base retains required runtime libraries, Git/SSH, GitHub CLI,
 Python, and process utilities. Build compilers stay in the full Bookworm stages.
+The repository credential client stage needs only Node and pnpm, so it builds on the
+slim base too.
 The build selects upstream required bundled plugins plus Codex and Slack before
 installing dependencies for the target architecture with lifecycle
 scripts enabled and runs upstream postinstall, plugin pruning, import-closure,

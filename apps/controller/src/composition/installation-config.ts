@@ -31,7 +31,7 @@ import {
   type SkippedDefaultPreset,
 } from "@openclaw-enterprise/occ";
 import { Check, Errors } from "typebox/value";
-import { validatePresetTemplate } from "@openclaw-enterprise/contracts";
+import { isName, NAME_RULE, validatePresetTemplate } from "@openclaw-enterprise/contracts";
 import {
   KubernetesComputeDriver,
   type KubernetesComputeDriverOptions,
@@ -341,8 +341,12 @@ function backendConfiguration(
 function presetDefinition(value: unknown, path: string): Pick<Preset, "name" | "template"> {
   const preset = object(value, path);
   closed(preset, ["name", "template"], path);
+  const name = nonempty(preset.name, `${path}.name`);
+  if (!isName(name)) {
+    throw new Error(`${path}.name must follow the Name rule: ${NAME_RULE}.`);
+  }
   return Object.freeze({
-    name: nonempty(preset.name, `${path}.name`),
+    name,
     template: validatePresetTemplate(preset.template),
   });
 }

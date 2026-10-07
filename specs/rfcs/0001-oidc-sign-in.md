@@ -1,16 +1,18 @@
 ---
+author: rclarke0
+implementation_status: Implemented
 status: Proposed
 ---
 
 # Proposal: Generic OIDC sign-in for existing accounts
 
-- **ID:** RFC-0042
+- **ID:** RFC-0001
 - **Owner:** rclarke0 (proposal). Auth design review: freeqaz. Scope and release: kevinlin-openai.
 - **Created:** 2026-09-30
 - **Last updated:** 2026-10-01
 - **RFC PR:** [#731][pr-731]; implementation [#790][pr-790], stacked on it
 - **Related:** [#729][issue-729]; SSO/SCIM stays in the 1.0 backlog ([#82][issue-82], [#92][issue-92]);
-  Google sign-in [PR #594][pr-594]; [RFC 31](31-human-federated-sign-in/index.md).
+  Google sign-in [PR #594][pr-594]; [RFC-0007](0007-human-federated-sign-in/index.md).
 - **Source baseline:** `main` at `ccf5d79b`; source links are pinned to it. Details may change as
   the implementation lands in the stacked PR; this document follows the code, not the reverse.
 
@@ -29,7 +31,7 @@ A team using Auth0, Okta, Entra ID or Keycloak wants to sign in to the Console w
 identity provider (IdP). OCC offers password, GitHub and Google sign-in and states that generic
 OIDC is unsupported ([authentication.md:15][ref-unsupported]). Google sign-in is already an
 OIDC flow, but its issuer and endpoints are constants ([google.ts:10-15][g-const]).
-RFC 31 left other providers to a future spec ([scope](31-human-federated-sign-in/index.md#scope));
+RFC-0007 left other providers to a future spec ([scope](0007-human-federated-sign-in/index.md#scope));
 this is that spec, limited to sign-in.
 
 <a id="scope"></a>
@@ -270,7 +272,7 @@ leeway; the JWKS stays uncached; the code cap is 4,096; denial audits carry the 
 [Authentication](../../docs/reference/authentication.md),
 [external sign-in](../../docs/reference/authentication/external-sign-in.md),
 [Google sign-in guide](../../docs/guides/deploy/google-sign-in.md),
-[RFC 31](31-human-federated-sign-in/index.md); source links above.
+[RFC-0007](0007-human-federated-sign-in/index.md); source links above.
 
 [pr-731]: https://github.com/openclaw/openclaw-enterprise/pull/731
 [oidc-validation]: https://openid.net/specs/openid-connect-core-1_0.html#IDTokenValidation

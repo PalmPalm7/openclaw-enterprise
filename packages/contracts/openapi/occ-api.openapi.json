@@ -405,7 +405,7 @@
               "name": {
                 "maxLength": 200,
                 "minLength": 1,
-                "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                 "type": "string"
               },
               "namespaceId": {
@@ -468,7 +468,7 @@
               "name": {
                 "maxLength": 200,
                 "minLength": 1,
-                "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                 "type": "string"
               },
               "namespaceId": {
@@ -10767,7 +10767,7 @@
                         "name": {
                           "maxLength": 200,
                           "minLength": 1,
-                          "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                           "type": "string"
                         }
                       },
@@ -10850,7 +10850,7 @@
                   "name": {
                     "maxLength": 200,
                     "minLength": 1,
-                    "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                    "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                     "type": "string"
                   }
                 },
@@ -11012,7 +11012,7 @@
                         "name": {
                           "maxLength": 200,
                           "minLength": 1,
-                          "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                           "type": "string"
                         }
                       },
@@ -11278,7 +11278,7 @@
                           "name": {
                             "maxLength": 200,
                             "minLength": 1,
-                            "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                            "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                             "type": "string"
                           },
                           "status": {
@@ -11375,7 +11375,7 @@
                   "name": {
                     "maxLength": 200,
                     "minLength": 1,
-                    "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                    "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                     "type": "string"
                   }
                 },
@@ -11414,7 +11414,7 @@
                         "name": {
                           "maxLength": 200,
                           "minLength": 1,
-                          "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                           "type": "string"
                         },
                         "status": {
@@ -11559,7 +11559,7 @@
                         "name": {
                           "maxLength": 200,
                           "minLength": 1,
-                          "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                           "type": "string"
                         },
                         "status": {
@@ -11684,7 +11684,7 @@
                         "name": {
                           "maxLength": 200,
                           "minLength": 1,
-                          "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                           "type": "string"
                         },
                         "status": {
@@ -11956,7 +11956,7 @@
                               "name": {
                                 "maxLength": 200,
                                 "minLength": 1,
-                                "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                                "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                                 "type": "string"
                               },
                               "namespaceId": {
@@ -12122,7 +12122,7 @@
                               "name": {
                                 "maxLength": 200,
                                 "minLength": 1,
-                                "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                                "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                                 "type": "string"
                               },
                               "namespaceId": {
@@ -12408,7 +12408,7 @@
                   "name": {
                     "maxLength": 200,
                     "minLength": 1,
-                    "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                    "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                     "type": "string"
                   },
                   "pluginApprovers": { "$ref": "#/components/schemas/def-2" },
@@ -12655,7 +12655,7 @@
                         "name": {
                           "maxLength": 200,
                           "minLength": 1,
-                          "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                           "type": "string"
                         },
                         "namespaceId": {
@@ -14205,7 +14205,7 @@
                   "name": {
                     "maxLength": 200,
                     "minLength": 1,
-                    "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                    "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                     "type": "string"
                   },
                   "pluginApprovers": { "$ref": "#/components/schemas/def-2" },
@@ -14901,7 +14901,7 @@
                           "displayName": {
                             "maxLength": 200,
                             "minLength": 1,
-                            "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                            "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                             "type": "string"
                           },
                           "repositoryRef": {
@@ -15183,7 +15183,7 @@
                         "name": {
                           "maxLength": 200,
                           "minLength": 1,
-                          "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                           "type": "string"
                         },
                         "namespaceId": {
@@ -15548,7 +15548,7 @@
                             "name": {
                               "maxLength": 200,
                               "minLength": 1,
-                              "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                              "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                               "type": "string"
                             },
                             "namespaceId": {
@@ -15714,7 +15714,7 @@
                             "name": {
                               "maxLength": 200,
                               "minLength": 1,
-                              "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                              "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                               "type": "string"
                             },
                             "namespaceId": {
@@ -16222,7 +16222,7 @@
                         "name": {
                           "maxLength": 200,
                           "minLength": 1,
-                          "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                           "type": "string"
                         },
                         "namespaceId": {
@@ -19846,7 +19846,7 @@
                           "displayName": {
                             "maxLength": 200,
                             "minLength": 1,
-                            "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                            "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                             "type": "string"
                           },
                           "repositoryRef": {
@@ -21436,7 +21436,7 @@
                         "name": {
                           "maxLength": 200,
                           "minLength": 1,
-                          "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                           "type": "string"
                         },
                         "namespaceId": {
@@ -22988,7 +22988,7 @@
                           "name": {
                             "maxLength": 200,
                             "minLength": 1,
-                            "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                            "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                             "type": "string"
                           },
                           "namespaceId": {
@@ -23172,7 +23172,7 @@
                   "name": {
                     "maxLength": 200,
                     "minLength": 1,
-                    "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                    "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                     "type": "string"
                   },
                   "secrets": {
@@ -24219,7 +24219,7 @@
                           "name": {
                             "maxLength": 200,
                             "minLength": 1,
-                            "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                            "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                             "type": "string"
                           },
                           "namespaceId": {
@@ -24355,7 +24355,7 @@
                   "name": {
                     "maxLength": 200,
                     "minLength": 1,
-                    "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                    "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                     "type": "string"
                   },
                   "permissions": {
@@ -24416,7 +24416,7 @@
                         "name": {
                           "maxLength": 200,
                           "minLength": 1,
-                          "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                           "type": "string"
                         },
                         "namespaceId": {
@@ -24653,7 +24653,7 @@
                         "name": {
                           "maxLength": 200,
                           "minLength": 1,
-                          "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                           "type": "string"
                         },
                         "namespaceId": {
@@ -24765,6 +24765,336 @@
         ]
       }
     },
+    "/namespaces/{namespaceId}/iam/service-principals": {
+      "get": {
+        "description": "Requires administer permission on the requested Installation. Requires read permission on the requested Namespace.",
+        "operationId": "listIAMServicePrincipals",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespaceId",
+            "required": true,
+            "schema": {
+              "pattern": "^ns_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "data": {
+                      "items": {
+                        "additionalProperties": false,
+                        "description": "A non-Agent automation identity fixed to one Namespace. It holds only the grants of AccessBindings that name it.",
+                        "properties": {
+                          "id": { "maxLength": 200, "minLength": 1, "type": "string" },
+                          "namespaceId": {
+                            "pattern": "^ns_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                            "type": "string"
+                          }
+                        },
+                        "required": ["id", "namespaceId"],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "meta": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "requestId": {
+                          "pattern": "^req_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": ["requestId"],
+                      "type": "object"
+                    }
+                  },
+                  "required": ["data", "meta"],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          },
+          "400": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          },
+          "401": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          },
+          "403": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          },
+          "404": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          },
+          "500": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          },
+          "503": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "List the Namespace's non-Agent ServicePrincipals",
+        "tags": ["IAM"],
+        "x-openclaw-permissions": [
+          { "action": "administer", "resourceKind": "installation", "scope": "requested" },
+          { "action": "read", "resourceKind": "namespace", "scope": "requested" }
+        ]
+      },
+      "post": {
+        "description": "Requires administer permission on the requested Installation. Requires read permission on the requested Namespace.",
+        "operationId": "createIAMServicePrincipal",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespaceId",
+            "required": true,
+            "schema": {
+              "pattern": "^ns_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "additionalProperties": false, "properties": {}, "type": "object" }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "data": {
+                      "additionalProperties": false,
+                      "description": "A non-Agent automation identity fixed to one Namespace. It holds only the grants of AccessBindings that name it.",
+                      "properties": {
+                        "id": { "maxLength": 200, "minLength": 1, "type": "string" },
+                        "namespaceId": {
+                          "pattern": "^ns_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": ["id", "namespaceId"],
+                      "type": "object"
+                    },
+                    "meta": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "requestId": {
+                          "pattern": "^req_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": ["requestId"],
+                      "type": "object"
+                    }
+                  },
+                  "required": ["data", "meta"],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          },
+          "400": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          },
+          "401": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          },
+          "403": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          },
+          "404": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          },
+          "409": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          },
+          "413": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          },
+          "415": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          },
+          "500": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          },
+          "503": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Create a Namespace ServicePrincipal with no grants for automation or CLI keys",
+        "tags": ["IAM"],
+        "x-openclaw-permissions": [
+          { "action": "administer", "resourceKind": "installation", "scope": "requested" },
+          { "action": "read", "resourceKind": "namespace", "scope": "requested" }
+        ]
+      }
+    },
+    "/namespaces/{namespaceId}/iam/service-principals/{servicePrincipalId}": {
+      "get": {
+        "description": "Requires administer permission on the requested Installation. Requires read permission on the requested Namespace.",
+        "operationId": "getIAMServicePrincipal",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespaceId",
+            "required": true,
+            "schema": {
+              "pattern": "^ns_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "servicePrincipalId",
+            "required": true,
+            "schema": { "maxLength": 200, "minLength": 1, "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "data": {
+                      "additionalProperties": false,
+                      "description": "A non-Agent automation identity fixed to one Namespace. It holds only the grants of AccessBindings that name it.",
+                      "properties": {
+                        "id": { "maxLength": 200, "minLength": 1, "type": "string" },
+                        "namespaceId": {
+                          "pattern": "^ns_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": ["id", "namespaceId"],
+                      "type": "object"
+                    },
+                    "meta": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "requestId": {
+                          "pattern": "^req_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": ["requestId"],
+                      "type": "object"
+                    }
+                  },
+                  "required": ["data", "meta"],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          },
+          "400": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          },
+          "401": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          },
+          "403": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          },
+          "404": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          },
+          "500": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          },
+          "503": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/def-7" } }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Get an exact Namespace ServicePrincipal",
+        "tags": ["IAM"],
+        "x-openclaw-permissions": [
+          { "action": "administer", "resourceKind": "installation", "scope": "requested" },
+          { "action": "read", "resourceKind": "namespace", "scope": "requested" }
+        ]
+      }
+    },
     "/namespaces/{namespaceId}/presets": {
       "get": {
         "description": "Requires read permission on the requested Namespace. Only Preset resources with individual read permission are returned.",
@@ -24803,7 +25133,7 @@
                           "name": {
                             "maxLength": 200,
                             "minLength": 1,
-                            "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                            "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                             "type": "string"
                           },
                           "namespaceId": {
@@ -24998,7 +25328,7 @@
                   "name": {
                     "maxLength": 200,
                     "minLength": 1,
-                    "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                    "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                     "type": "string"
                   },
                   "template": {
@@ -25123,7 +25453,7 @@
                         "name": {
                           "maxLength": 200,
                           "minLength": 1,
-                          "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                           "type": "string"
                         },
                         "namespaceId": {
@@ -25427,7 +25757,7 @@
                         "name": {
                           "maxLength": 200,
                           "minLength": 1,
-                          "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                           "type": "string"
                         },
                         "namespaceId": {
@@ -25625,7 +25955,7 @@
                   "name": {
                     "maxLength": 200,
                     "minLength": 1,
-                    "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                    "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                     "type": "string"
                   },
                   "template": {
@@ -25749,7 +26079,7 @@
                         "name": {
                           "maxLength": 200,
                           "minLength": 1,
-                          "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                           "type": "string"
                         },
                         "namespaceId": {
@@ -25966,7 +26296,7 @@
                           "name": {
                             "maxLength": 200,
                             "minLength": 1,
-                            "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                            "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                             "type": "string"
                           },
                           "namespaceId": {
@@ -26082,7 +26412,7 @@
                   "name": {
                     "maxLength": 200,
                     "minLength": 1,
-                    "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                    "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                     "type": "string"
                   },
                   "value": {
@@ -26270,7 +26600,127 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/def-12" } }
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "data": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "consumers": {
+                          "additionalProperties": false,
+                          "description": "Current references that block deletion of the Secret. Returned by the exact Secret read only.",
+                          "properties": {
+                            "agents": {
+                              "description": "Readable Agents whose draft, active revision, or pending deployment references the Secret. Each needs a new deployment to receive a rotated value.",
+                              "items": {
+                                "pattern": "^agt_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                                "type": "string"
+                              },
+                              "maxItems": 50,
+                              "type": "array"
+                            },
+                            "configurations": {
+                              "description": "Readable Configurations whose `secretBindings` reference the Secret.",
+                              "items": {
+                                "pattern": "^cfg_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                                "type": "string"
+                              },
+                              "maxItems": 50,
+                              "type": "array"
+                            },
+                            "credentialSources": {
+                              "description": "Readable credential sources that hold the Secret.",
+                              "items": {
+                                "pattern": "^cs_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                                "type": "string"
+                              },
+                              "maxItems": 50,
+                              "type": "array"
+                            },
+                            "provisioningRequests": {
+                              "description": "Work IDs of queued or running Agent provisioning requests that reference the Secret, listed only for the actor that started them.",
+                              "items": {
+                                "maxLength": 200,
+                                "minLength": 1,
+                                "pattern": "^[A-Za-z0-9._~:@/-]{1,200}$",
+                                "type": "string"
+                              },
+                              "maxItems": 50,
+                              "type": "array"
+                            },
+                            "truncated": {
+                              "description": "`true` when the Secret has more than 50 references; only the first 50, ordered by kind and ID, are examined.",
+                              "type": "boolean"
+                            },
+                            "unreadable": {
+                              "description": "Examined references to resources the caller may not read. They are counted, never named.",
+                              "maximum": 50,
+                              "minimum": 0,
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "agents",
+                            "configurations",
+                            "credentialSources",
+                            "provisioningRequests",
+                            "unreadable",
+                            "truncated"
+                          ],
+                          "type": "object"
+                        },
+                        "id": {
+                          "pattern": "^sec_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                          "type": "string"
+                        },
+                        "name": {
+                          "maxLength": 200,
+                          "minLength": 1,
+                          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
+                          "type": "string"
+                        },
+                        "namespaceId": {
+                          "pattern": "^ns_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                          "type": "string"
+                        },
+                        "ref": {
+                          "additionalProperties": false,
+                          "description": "Exact OCC Secret reference. Shape: `{ \"kind\": \"secret\", \"namespaceId\": \"ns_...\", \"id\": \"sec_...\" }`.",
+                          "properties": {
+                            "id": {
+                              "pattern": "^sec_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                              "type": "string"
+                            },
+                            "kind": { "const": "secret", "type": "string" },
+                            "namespaceId": {
+                              "pattern": "^ns_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                              "type": "string"
+                            }
+                          },
+                          "required": ["kind", "namespaceId", "id"],
+                          "type": "object"
+                        }
+                      },
+                      "required": ["id", "namespaceId", "name", "ref", "consumers"],
+                      "type": "object"
+                    },
+                    "meta": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "requestId": {
+                          "pattern": "^req_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": ["requestId"],
+                      "type": "object"
+                    }
+                  },
+                  "required": ["data", "meta"],
+                  "type": "object"
+                }
+              }
             },
             "description": "Default Response"
           },
@@ -26311,7 +26761,7 @@
             "description": "Default Response"
           }
         },
-        "summary": "Get exact Namespace-owned Secret metadata without revealing material",
+        "summary": "Get exact Namespace-owned Secret metadata and its readable consumers",
         "tags": ["Secrets"],
         "x-openclaw-permissions": [
           { "action": "read", "resourceKind": "secret", "scope": "requested" }
@@ -26477,7 +26927,7 @@
                           "name": {
                             "maxLength": 200,
                             "minLength": 1,
-                            "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                            "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                             "type": "string"
                           },
                           "namespaceId": {
@@ -26576,7 +27026,7 @@
                   "name": {
                     "maxLength": 200,
                     "minLength": 1,
-                    "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                    "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                     "type": "string"
                   }
                 },
@@ -26618,7 +27068,7 @@
                         "name": {
                           "maxLength": 200,
                           "minLength": 1,
-                          "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                           "type": "string"
                         },
                         "namespaceId": {
@@ -26839,7 +27289,7 @@
                         "name": {
                           "maxLength": 200,
                           "minLength": 1,
-                          "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                           "type": "string"
                         },
                         "namespaceId": {
@@ -27005,7 +27455,7 @@
                         "name": {
                           "maxLength": 200,
                           "minLength": 1,
-                          "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                           "type": "string"
                         },
                         "namespaceId": {
@@ -27160,7 +27610,7 @@
                         "name": {
                           "maxLength": 200,
                           "minLength": 1,
-                          "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$",
+                          "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                           "type": "string"
                         },
                         "namespaceId": {

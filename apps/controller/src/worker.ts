@@ -470,6 +470,14 @@ function validLifecycleHooks(driver: Driver): boolean {
   );
 }
 
+/** A Driver's optional Namespace failure reason, kept only when bounded and printable. */
+function namespaceFailureReason(observation: Observation): string | undefined {
+  const reason = (observation as { readonly reason?: unknown }).reason;
+  return typeof reason === "string" && reason.length > 0 && printableComputeFailureMessage(reason)
+    ? reason
+    : undefined;
+}
+
 function validObservation(value: unknown, namespaceId: string, target: "ready" | "deleted") {
   if (typeof value !== "object" || value === null || Object.hasOwn(value, "installationId")) {
     return false;
@@ -4064,6 +4072,12 @@ export class ControllerWorker {
       resolved.outcome === "retry" && claim.attemptCount >= this.maxAttempts
         ? "permanent"
         : resolved.outcome;
+    // The Compute Driver's bounded reason for a failed Namespace pass; the lifecycle audit
+    // and Namespace status keep only the failure class.
+    const reason =
+      claim.namespaceTarget !== "ready" || resolved.observation?.failure === undefined
+        ? undefined
+        : namespaceFailureReason(resolved.observation);
     this.emit({
       event: "worker.completed",
       ...workLogFields(claim),
@@ -4071,6 +4085,7 @@ export class ControllerWorker {
       result: resolved.outcome,
       outcome: resolved.outcome,
       code: resolved.code,
+      ...(reason === undefined ? {} : { reason }),
     });
   }
 

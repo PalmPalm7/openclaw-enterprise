@@ -97,6 +97,52 @@ Before selecting an older controller or runtime image, verify it can read all
 state written by the candidate and restore compatible data if required. Never
 delete Agents, revisions, PVCs, or the bootstrap volume to force recovery.
 
+## Correct an invalid Installation name
+
+The stored Installation name must follow the API Name rule: 1 to 200
+characters, with no leading or trailing whitespace, control characters, or line
+or paragraph separators. The upgrade command's startup preflight reads the name
+through OCC and checks it with the selected controller image's rule before any
+writer stops. A failure prints the rule and `INSTALLATION_NAME_INVALID`, deletes
+the preflight resources, and stops; the old release keeps serving. To check
+before the maintenance window, run this from the candidate checkout:
+
+```bash
+occ --output json installation get | node --input-type=module -e '
+import { isName, NAME_RULE } from "./packages/contracts/src/index.ts";
+let s = ""; for await (const c of process.stdin) s += c;
+if (!isName(JSON.parse(s).name)) { console.error(NAME_RULE); process.exit(1); }'
+```
+
+No API renames an Installation, so correct `occ.installation.name` with the
+dedicated migrator credential (`OCC_MIGRATION_DATABASE_URL` as in
+[the upgrade baseline](upgrade-baseline.md)). Shell-quote the name; psql's
+`:'name'` quotes it for SQL:
+
+```bash
+psql "$OCC_MIGRATION_DATABASE_URL" -v ON_ERROR_STOP=1 -v name='<intended name>' <<'SQL'
+UPDATE occ.installation SET name = :'name';
+SQL
+```
+
+psql prints `UPDATE 1`. The running API keeps the name it read at startup, so
+restart it before you check again:
+
+```bash
+kubectl --kubeconfig /secure/occ/kubeconfig --context '<reviewed-context>' \
+  --namespace openclaw-system rollout restart deployment/openclaw-enterprise-api
+kubectl --kubeconfig /secure/occ/kubeconfig --context '<reviewed-context>' \
+  --namespace openclaw-system rollout status deployment/openclaw-enterprise-api
+```
+
+The database accepts some names the rule refuses, so run the upgrade command
+again with a new evidence directory; its preflight checks the name again. If
+the candidate API and worker log
+`INSTALLATION_NAME_INVALID` after the helper stopped OCC (the name changed after
+the preflight), Helm's `--wait` has marked the candidate release `failed`:
+rename as above, follow the Helm failure steps above, then repeat the command
+with `--resume --migration-history-checked`.
+
 ## Roll back across human sign-in
 
 Migration `0037` adds the human sign-in state. `helm rollback` skips the

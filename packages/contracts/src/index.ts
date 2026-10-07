@@ -244,6 +244,24 @@ export interface SecretMetadata extends SecretIdentity {
   readonly ref: SecretReference;
 }
 
+/**
+ * Current references that keep a Secret from deletion, limited to resources the caller may
+ * read. `unreadable` counts the examined references the caller may not read, without naming
+ * them; `truncated` means more references exist than OCC examined.
+ */
+export interface SecretConsumers {
+  readonly agents: readonly string[];
+  readonly configurations: readonly string[];
+  readonly credentialSources: readonly string[];
+  readonly provisioningRequests: readonly string[];
+  readonly unreadable: number;
+  readonly truncated: boolean;
+}
+
+export interface SecretDetail extends SecretMetadata {
+  readonly consumers: SecretConsumers;
+}
+
 export interface SecretBinding {
   readonly source: SecretReference;
   readonly delivery?: { readonly type: "env" };
@@ -1073,6 +1091,19 @@ export interface IAMDriver extends Driver {
     namespaceId: string,
     bindingId: string,
   ): Promise<boolean>;
+  listNamespaceServicePrincipals?(
+    context: IAMPolicyReadContext,
+    namespaceId: string,
+  ): Promise<readonly Readonly<ServicePrincipal>[]>;
+  getNamespaceServicePrincipal?(
+    context: IAMPolicyReadContext,
+    namespaceId: string,
+    servicePrincipalId: string,
+  ): Promise<Readonly<ServicePrincipal> | undefined>;
+  createNamespaceServicePrincipal?(
+    context: IAMPolicyManagementContext,
+    input: IAMManagedServicePrincipalInput,
+  ): Promise<Readonly<ServicePrincipal>>;
 }
 
 export interface IAMPolicyReadRepository {
@@ -1093,6 +1124,12 @@ export interface IAMPolicyReadRepository {
     resourceKind: ResourceKind,
     resourceIds: readonly string[],
   ): Promise<readonly Readonly<Restriction>[]>;
+  /** Non-Agent ServicePrincipals of the exact Namespace; Agent identities are excluded. */
+  listServicePrincipals(namespaceId: string): Promise<readonly Readonly<ServicePrincipal>[]>;
+  getServicePrincipal(
+    namespaceId: string,
+    servicePrincipalId: string,
+  ): Promise<Readonly<ServicePrincipal> | undefined>;
 }
 
 export interface IAMPolicyRepository extends IAMPolicyReadRepository {
@@ -1100,6 +1137,7 @@ export interface IAMPolicyRepository extends IAMPolicyReadRepository {
   deleteRole(namespaceId: string, roleId: string): Promise<boolean>;
   createAccessBinding(binding: AccessBinding): Promise<Readonly<AccessBinding>>;
   deleteAccessBinding(namespaceId: string, bindingId: string): Promise<boolean>;
+  createServicePrincipal(servicePrincipal: ServicePrincipal): Promise<Readonly<ServicePrincipal>>;
 }
 
 export interface IAMPolicyReadContext {
@@ -1135,6 +1173,12 @@ export interface IAMManagedAccessBindingInput {
   readonly roleId: string;
   readonly resourceKind: ManagedIAMResourceKind;
   readonly resourceId: string;
+}
+
+/** A non-Agent automation identity fixed to one Namespace; it carries no grant. */
+export interface IAMManagedServicePrincipalInput {
+  readonly id: string;
+  readonly namespaceId: string;
 }
 
 export interface ServiceAccountDriver extends Driver {
@@ -1354,6 +1398,13 @@ export interface NamespaceEnsureResult extends Scope {
   readonly namespaceId: string;
   readonly namespaceReady: boolean;
   readonly failure?: NamespaceLifecycleFailure;
+  /**
+   * Optional bounded, non-secret operator explanation of `failure`, at most 256 printable
+   * characters. It names only this Namespace's own placement, never another tenant's
+   * identifiers or marker values. The worker logs it; status and audit keep only `failure`.
+   * The log keeps only letters, digits, spaces and `. _ : / @ -`; other text is dropped.
+   */
+  readonly reason?: string;
 }
 
 export interface NamespaceDeleteResult extends Scope {

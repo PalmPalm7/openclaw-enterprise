@@ -83,11 +83,12 @@ sysctl change onto a shared cluster.
 
 If the printed HTTPS console URL shows `NET::ERR_CERT_AUTHORITY_INVALID` or an
 unknown-issuer warning, check the certificate using the public CA from the same
-installation. Replace both values below with startup's **Browser CA certificate**
-path and **Browser console** URL; keep the printed hostname and port:
+installation. Set `BROWSER_CA` to its path on the computer running these commands
+(`./browser-ca.crt` if copied from the startup machine), and `CONSOLE_URL` to
+startup's **Browser console** URL; keep the printed hostname and port:
 
 ```bash
-BROWSER_CA='<printed-browser-ca.crt-path>'
+BROWSER_CA='<local-browser-ca.crt-path>'
 CONSOLE_URL='<printed-HTTPS-browser-console-URL>'
 openssl x509 -in "$BROWSER_CA" -noout -subject -dates -fingerprint -sha256
 curl --fail --show-error --max-time 10 --cacert "$BROWSER_CA" \
@@ -158,16 +159,19 @@ Replace `8443` in both places when startup printed a different port. The
 `localhost` bind keeps the forwarded port on the browser machine's loopback
 even when that machine's SSH configuration sets `GatewayPorts yes`.
 
-Copy only the printed public CA to that same computer, then follow
-[local browser CA trust](#the-local-console-reports-a-certificate-error) if the
-browser does not already trust it:
+Copy only the printed public CA to that same computer:
 
 ```bash
 scp <user>@<startup-host>:<printed-ca-path> ./browser-ca.crt
+BROWSER_CA='./browser-ca.crt'
+CONSOLE_URL='<printed-HTTPS-browser-console-URL>'
 ```
 
-`<printed-ca-path>` is the `browser-ca.crt` path from startup. Leave the CA
-private key and the state directory on the startup machine. Open the printed
+`<printed-ca-path>` is the `browser-ca.crt` path from startup. Follow
+[local browser CA trust](#the-local-console-reports-a-certificate-error) on the
+browser computer using the local `BROWSER_CA` value above instead of the startup
+machine's CA path. Keep the printed hostname and port in `CONSOLE_URL`. Leave the
+CA private key and the state directory on the startup machine. Open the printed
 URL. The console sign-in page loads. Stop the forward when you are done. Do
 not publish the console port on an address other than loopback. This name and
 certificate are for the private development installation.

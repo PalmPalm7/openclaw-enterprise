@@ -49,7 +49,7 @@
   },
   "packages/contracts/src/api/common.ts": {
     "no-control-regex": {
-      "count": 2
+      "count": 1
     }
   },
   "packages/occ/src/state/platform-state.ts": {

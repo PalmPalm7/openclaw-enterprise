@@ -283,7 +283,8 @@ development NetworkPolicy in `oce-system`.
 The launcher sets
 [`network.pluginStatusProxySourceCidrs`](../../reference/drivers/kubernetes-compute/networking-and-isolation.md#networking)
 to the k3d node's Pod bridge address, enabling plugin status and diagnostics and
-letting a dedicated Codex Gateway start once on a first deploy.
+letting a dedicated Codex Gateway start once on a first deploy. The two-minute
+bridge-route wait also bounds each container-engine lookup.
 
 The OpenShell profile declares an `openshell` Backend for the Gateway
 endpoint and selects both the OpenShell Sandbox and the

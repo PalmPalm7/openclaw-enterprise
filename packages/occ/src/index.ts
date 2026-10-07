@@ -86,15 +86,20 @@ import type {
   Secret,
   SecretBindings,
   SecretReference,
+  SecretConsumers,
+  SecretDetail,
   SecretDriver,
   SecretMetadata,
   ServiceAccount,
   ServiceAccountCredential,
   ServiceAccountDriver,
+  ServicePrincipal,
   HarnessAuthBinding,
   HarnessAuthSnapshot,
 } from "@openclaw-enterprise/contracts";
 import {
+  isName,
+  NAME_RULE,
   normalizeInitialWorkspaceFiles,
   normalizeWorkspaceDefaultsId,
   PERMISSION_ACTIONS,
@@ -157,6 +162,7 @@ import {
   RuntimeLogsSandboxNotFoundError,
   ScopeViolationError,
   SecretBindingValidationError,
+  SecretReferencedError,
   SecretValueError,
 } from "./errors.ts";
 import { validateModelProviderSettings } from "./model-provider-settings.ts";
@@ -732,6 +738,29 @@ const RUNTIME_LOG_REQUEST_TIMEOUT_MS = 10_000;
  * gateway copy does not prove that no late create is still in flight, so the record is kept.
  */
 const CREDENTIAL_REGISTRATION_FENCE_MS = 2 * CREDENTIAL_GATEWAY_TIMEOUT_MS + 10_000;
+/**
+ * The most references a Secret read or delete examines. Each one costs authorization work,
+ * so the bound keeps both the response and the IAM work small. Delete makes those decisions
+ * while it holds the Namespace and Secret locks, so the bound also limits that lock window.
+ */
+const SECRET_CONSUMER_LIMIT = 50;
+const SECRET_CONSUMER_KINDS = Object.freeze([
+  "agents",
+  "configurations",
+  "credentialSources",
+  "provisioningRequests",
+] as const);
+type SecretReferenceKind = Awaited<
+  ReturnType<PlatformReadView["secrets"]["listReferences"]>
+>["references"][number]["kind"];
+const SECRET_CONSUMER_FIELDS: Readonly<
+  Record<SecretReferenceKind, (typeof SECRET_CONSUMER_KINDS)[number]>
+> = Object.freeze({
+  agent: "agents",
+  configuration: "configurations",
+  credential_source: "credentialSources",
+  provisioning_request: "provisioningRequests",
+});
 
 /** Rejects unknown and missing catalog fields before any Credential Gateway effect. */
 function credentialSourceFieldsMatch(
@@ -817,12 +846,6 @@ function provisioningFailureMessage(code: string, error: unknown): string {
   return "Agent provisioning could not complete.";
 }
 
-// At most 200 characters counted as code points, as the API contract (JSON Schema
-// maxLength) and PostgreSQL char_length count them, not UTF-16 code units.
-function validName(value: unknown): value is string {
-  return isNonEmptyString(value) && Array.from(value).length <= 200;
-}
-
 type PluginDiscoveryCredential = {
   readonly accessToken?: string;
   readonly secretRef?: SecretReference;
@@ -904,17 +927,11 @@ function validRepositoryOption(value: unknown): value is RepositoryOption {
     validRepositorySelector(option?.repositoryRef) &&
     isNonEmptyString(displayName) &&
     displayName.length <= 200 &&
-    ![...displayName].some((character) => {
-      const code = character.charCodeAt(0);
-      return code <= 0x1f || code === 0x7f;
-    }) &&
+    !hasControlCharacter(displayName) &&
     (option?.description === undefined ||
       (isNonEmptyString(option.description) &&
         option.description.length <= 512 &&
-        ![...option.description].some((character) => {
-          const code = character.charCodeAt(0);
-          return code <= 0x1f || code === 0x7f;
-        }))) &&
+        !hasControlCharacter(option.description))) &&
     Array.isArray(allowedProfiles) &&
     allowedProfiles.length >= 1 &&
     allowedProfiles.length <= 16 &&
@@ -1016,10 +1033,19 @@ const NAMESPACE_POLICY_RESOURCE_KINDS: ReadonlySet<ResourceKind> = new Set<Resou
 ]);
 
 /**
+ * Why the Namespace policy API refuses `create` Permissions. `create` is authorized against
+ * the Namespace collection, never an existing resource, and this API binds only exact
+ * resources, so such a Permission could never take effect through it. Role creation and
+ * binding creation share the reason so their refusals stay consistent.
+ */
+const NAMESPACE_POLICY_CREATE_REASON =
+  "Create is checked on the Namespace, and this API binds only exact resources";
+
+/**
  * Refuses an AccessBinding whose Role cannot take effect on the binding's target, so a
- * policy write never reports success for a grant that IAM evaluation drops. `create` is
- * authorized against the Namespace, never an existing resource, so no exact-resource
- * binding grants it; a Role with no Permission for the target's kind grants nothing there.
+ * policy write never reports success for a grant that IAM evaluation drops. Role creation
+ * already refuses `create` Permissions; this check still covers stored Roles that predate
+ * that refusal. A Role with no Permission for the target's kind grants nothing there.
  * Roles that also name other kinds stay valid: one Role may be bound to several targets.
  */
 function assertAccessBindingRoleApplies(role: Readonly<Role>, resourceKind: ResourceKind): void {
@@ -1029,9 +1055,9 @@ function assertAccessBindingRoleApplies(role: Readonly<Role>, resourceKind: Reso
   if (creates.length > 0) {
     throw new IAMAccessBindingRoleError(
       fittedList(
-        `Role ${role.id} has Permissions that no AccessBinding can grant: `,
+        `Role ${role.id} has Permissions this API cannot bind: `,
         creates.map(label),
-        ". No AccessBinding grants create: only Installation administrators create resources; remove them from the Role.",
+        `. ${NAMESPACE_POLICY_CREATE_REASON}; bind a Role without them.`,
       ),
     );
   }
@@ -1088,8 +1114,13 @@ export class OpenClawController {
   private readonly configuredServiceAccountDriverId: string | undefined;
 
   constructor(installation: Installation, options: ControllerOptions = {}) {
-    if (!isNonEmptyString(installation.id) || !validName(installation.name)) {
+    if (!isNonEmptyString(installation.id)) {
       throw new ScopeViolationError("The controller requires one valid server-owned Installation.");
+    }
+    if (!isName(installation.name)) {
+      throw new ScopeViolationError(
+        `The stored Installation name breaks the Name rule: ${NAME_RULE}.`,
+      );
     }
     if (
       !isNonEmptyString(installation.createdAt) ||
@@ -1111,8 +1142,10 @@ export class OpenClawController {
     this.defaultPresets = immutableCopy(options.defaultPresets ?? []);
     const presetNames = new Set<string>();
     for (const preset of this.defaultPresets) {
-      if (!validName(preset.name) || presetNames.has(preset.name)) {
-        throw new PresetValidationError("Default Presets require distinct valid names.");
+      if (!isName(preset.name) || presetNames.has(preset.name)) {
+        throw new PresetValidationError(
+          `Default Presets require distinct names that follow the Name rule: ${NAME_RULE}.`,
+        );
       }
       presetNames.add(preset.name);
     }
@@ -1375,7 +1408,7 @@ export class OpenClawController {
 
   async createIAMRole(principalId: string, input: CreateIAMRoleInput): Promise<Readonly<Role>> {
     const permissions = this.iamRolePermissions(input.permissions);
-    if (input.name !== undefined && !validName(input.name)) {
+    if (input.name !== undefined && !isName(input.name)) {
       throw new IAMPolicyValidationError("/name", "The IAM Role name is invalid.");
     }
     const namespace = await this.admitIAMPolicyOperation(principalId, input.namespaceId);
@@ -1582,6 +1615,65 @@ export class OpenClawController {
       );
     }
     return deleted;
+  }
+
+  async listIAMServicePrincipals(
+    principalId: string,
+    namespaceId: string,
+  ): Promise<readonly Readonly<ServicePrincipal>[]> {
+    const namespace = await this.admitIAMPolicyOperation(principalId, namespaceId);
+    const driver = this.iamPolicyDriver("listNamespaceServicePrincipals");
+    return this.read((state) =>
+      this.iamPolicyOperation(() =>
+        driver.listNamespaceServicePrincipals!({ policy: state.iamPolicy }, namespace.id),
+      ),
+    );
+  }
+
+  async getIAMServicePrincipal(
+    principalId: string,
+    namespaceId: string,
+    servicePrincipalId: string,
+  ): Promise<Readonly<ServicePrincipal>> {
+    if (!isNonEmptyString(servicePrincipalId)) {
+      throw new ScopeViolationError("The exact ServicePrincipal identity is missing.");
+    }
+    const namespace = await this.admitIAMPolicyOperation(principalId, namespaceId);
+    const driver = this.iamPolicyDriver("getNamespaceServicePrincipal");
+    const found = await this.read((state) =>
+      this.iamPolicyOperation(() =>
+        driver.getNamespaceServicePrincipal!(
+          { policy: state.iamPolicy },
+          namespace.id,
+          servicePrincipalId,
+        ),
+      ),
+    );
+    if (found === undefined) {
+      throw new ScopeViolationError("The ServicePrincipal does not belong to the exact Namespace.");
+    }
+    return found;
+  }
+
+  /**
+   * Creates a non-Agent ServicePrincipal fixed to one Namespace. It holds no grant until an
+   * AccessBinding names it, and its keys are issued through the service-key route.
+   */
+  async createIAMServicePrincipal(
+    principalId: string,
+    namespaceId: string,
+  ): Promise<Readonly<ServicePrincipal>> {
+    const namespace = await this.admitIAMPolicyOperation(principalId, namespaceId);
+    const driver = this.iamPolicyDriver("createNamespaceServicePrincipal");
+    return this.mutate(async (state) => {
+      await this.holdIAMPolicyAuthority(state, principalId, namespace.id);
+      return this.iamPolicyOperation(() =>
+        driver.createNamespaceServicePrincipal!(
+          { policy: state.iamPolicy },
+          { id: `spn_${crypto.randomUUID()}`, namespaceId: namespace.id },
+        ),
+      );
+    });
   }
 
   async listAgents(
@@ -1876,8 +1968,13 @@ export class OpenClawController {
     input: ProvisionAgentInput,
     auditEvent?: (result: Readonly<ProvisionAgentResult>) => AuditEvent,
   ): Promise<Readonly<ProvisionAgentResult>> {
+    // Authorize the Namespace-level grants before reading the plan, as status and retry do: a
+    // caller without them gets the same audited denial whatever the body says, and never a
+    // validation answer about a Namespace they cannot provision in. A replay needs these too
+    // (authorizeProvisioningRecord), so the order changes no authorized outcome.
+    await this.authorizeProvisioningRequest(principalId, input.namespaceId);
     const requestId = requireProvisioningRequestId(input.requestId);
-    if (!validName(input.name)) {
+    if (!isName(input.name)) {
       throw new ScopeViolationError("The Agent name is invalid.");
     }
     const configurationInput = normalizeProvisioningConfiguration(input.configuration);
@@ -1918,7 +2015,7 @@ export class OpenClawController {
         "Agent provisioning requires dedicated Harness authentication.",
       );
     }
-    // Refuse before any lookup, authorization or write: the worker cannot hand off a
+    // Refuse before any lookup or write: the worker cannot hand off a
     // credential-source plan, and admission does not authorize the source.
     if (harnessAuth.method === "credential_source") {
       throw new SecretBindingValidationError(
@@ -1953,16 +2050,6 @@ export class OpenClawController {
       state.provisioning.findByRequest(input.namespaceId, principalId, requestId),
     );
     if (replay === undefined) {
-      await this.authorize(principalId, "create", {
-        kind: "agent",
-        id: input.namespaceId,
-        namespaceId: input.namespaceId,
-      });
-      await this.authorize(principalId, "create", {
-        kind: "configuration",
-        id: input.namespaceId,
-        namespaceId: input.namespaceId,
-      });
       // A replay is checked against the current Installation by authorizeProvisioningRecord.
       validateComputeAgentProvisioning(compute, executionMode, configurationInput.values);
       // Reject foreign references before channel validation can report them as a scope miss.
@@ -3084,7 +3171,7 @@ export class OpenClawController {
     principalId: string,
     input: CreateNamespaceInput,
   ): Promise<Readonly<Namespace>> {
-    if (!validName(input.name)) {
+    if (!isName(input.name)) {
       throw new ScopeViolationError("The Namespace name is invalid.");
     }
     return this.mutate(async (state) => {
@@ -3355,7 +3442,7 @@ export class OpenClawController {
   }
 
   async createPreset(principalId: string, input: CreatePresetInput): Promise<Readonly<Preset>> {
-    if (!validName(input.name)) {
+    if (!isName(input.name)) {
       throw new PresetValidationError("The Preset name is invalid.");
     }
     this.namespaceIdentity(input.namespaceId);
@@ -3419,7 +3506,7 @@ export class OpenClawController {
   }
 
   async updatePreset(principalId: string, input: UpdatePresetInput): Promise<Readonly<Preset>> {
-    if (input.name !== undefined && !validName(input.name)) {
+    if (input.name !== undefined && !isName(input.name)) {
       throw new PresetValidationError("The Preset name is invalid.");
     }
     this.namespaceIdentity(input.namespaceId);
@@ -3536,7 +3623,7 @@ export class OpenClawController {
     input: CreateSecretInput,
   ): Promise<Readonly<SecretMetadata>> {
     this.validateSecretValue(input.value);
-    if (!validName(input.name)) {
+    if (!isName(input.name)) {
       throw new ScopeViolationError("The Secret name is invalid.");
     }
     this.namespaceIdentity(input.namespaceId);
@@ -3574,7 +3661,7 @@ export class OpenClawController {
     principalId: string,
     namespaceId: string,
     secretId: string,
-  ): Promise<Readonly<SecretMetadata>> {
+  ): Promise<Readonly<SecretDetail>> {
     await this.authorize(principalId, "read", { kind: "secret", id: secretId, namespaceId });
     return this.read(async (state) => {
       await this.exactNamespace(state, namespaceId);
@@ -3582,7 +3669,10 @@ export class OpenClawController {
       if (!secret) {
         throw new ScopeViolationError("The Secret does not belong to the exact Namespace.");
       }
-      return this.secretMetadata(secret);
+      return Object.freeze({
+        ...this.secretMetadata(secret),
+        consumers: await this.secretConsumers(state, principalId, namespaceId, secret.id),
+      });
     });
   }
 
@@ -3652,10 +3742,12 @@ export class OpenClawController {
       if (!secret) {
         throw new ScopeViolationError("The Secret does not belong to the exact Namespace.");
       }
-      if (await state.secrets.hasReferences(namespace.id, secret.id)) {
-        throw new ResourceStateConflictError(
-          "A Configuration, credential source, Agent draft, active revision, pending deployment, or pending Agent provisioning request still references the Secret. Remove those references, or let provisioning finish, first.",
-        );
+      const consumers = await this.secretConsumers(state, principalId, namespace.id, secret.id);
+      if (
+        consumers.unreadable > 0 ||
+        SECRET_CONSUMER_KINDS.some((kind) => consumers[kind].length > 0)
+      ) {
+        throw new SecretReferencedError(consumers);
       }
       const removed = await accessBindingsTargeting(state, namespace.id, "secret", secret.id);
       const driver = this.secretDriver(secret.driverId);
@@ -3678,7 +3770,7 @@ export class OpenClawController {
     audit?: (source: Readonly<CredentialSourceMetadata>) => AuditEvent,
   ): Promise<Readonly<CredentialSourceMetadata & { readonly status?: CredentialSourceStatus }>> {
     this.assertCredentialSourceTransactionBoundary();
-    if (!validName(input.name)) {
+    if (!isName(input.name)) {
       throw new ScopeViolationError("The credential source name is invalid.");
     }
     const config = Object.freeze({ ...(input.config ?? {}) });
@@ -4090,7 +4182,7 @@ export class OpenClawController {
     principalId: string,
     input: CreateServiceAccountInput,
   ): Promise<Readonly<ServiceAccount>> {
-    if (!validName(input.name)) {
+    if (!isName(input.name)) {
       throw new ScopeViolationError("The ServiceAccount name is invalid.");
     }
     this.namespaceIdentity(input.namespaceId);
@@ -5272,7 +5364,7 @@ export class OpenClawController {
   }
 
   async createAgent(principalId: string, input: CreateAgentInput): Promise<Readonly<Agent>> {
-    if (!validName(input.name)) {
+    if (!isName(input.name)) {
       throw new ScopeViolationError("The Agent name is invalid.");
     }
     if (!isNonEmptyString(input.configurationId)) {
@@ -6572,6 +6664,144 @@ export class OpenClawController {
     return (await this.authorizationDecision(principalId, "read", resource)).decision.allowed;
   }
 
+  /**
+   * The current references to a Secret, named only where the caller may read the
+   * referencing resource; the rest are counted. One reference query examines at most
+   * SECRET_CONSUMER_LIMIT references. Each costs one `read` decision, except a pending
+   * provisioning request: one record read, then, for its own actor only, the decisions its
+   * status read makes. Identical decisions are made once per call.
+   */
+  private async secretConsumers(
+    state: Pick<PlatformReadView, "secrets" | "provisioning">,
+    principalId: string,
+    namespaceId: string,
+    secretId: string,
+  ): Promise<Readonly<SecretConsumers>> {
+    const page = await state.secrets.listReferences(namespaceId, secretId, SECRET_CONSUMER_LIMIT);
+    const named: Record<(typeof SECRET_CONSUMER_KINDS)[number], string[]> = {
+      agents: [],
+      configurations: [],
+      credentialSources: [],
+      provisioningRequests: [],
+    };
+    let unreadable = 0;
+    const decisions = new Map<string, boolean>();
+    const allowed = async (
+      action: AuthorizationRequest["action"],
+      resource: ResourceRef,
+    ): Promise<boolean> => {
+      const key = JSON.stringify([action, resource.kind, resource.namespaceId, resource.id]);
+      let decision = decisions.get(key);
+      if (decision === undefined) {
+        decision = (await this.authorizationDecision(principalId, action, resource)).decision
+          .allowed;
+        decisions.set(key, decision);
+      }
+      return decision;
+    };
+    for (const reference of page.references) {
+      const readable =
+        reference.kind === "provisioning_request"
+          ? await this.canReadProvisioningRequest(
+              state,
+              principalId,
+              namespaceId,
+              reference.id,
+              allowed,
+            )
+          : await allowed("read", { kind: reference.kind, id: reference.id, namespaceId });
+      if (!readable) {
+        unreadable += 1;
+        continue;
+      }
+      named[SECRET_CONSUMER_FIELDS[reference.kind]].push(reference.id);
+    }
+    return Object.freeze({
+      agents: Object.freeze(named.agents),
+      configurations: Object.freeze(named.configurations),
+      credentialSources: Object.freeze(named.credentialSources),
+      provisioningRequests: Object.freeze(named.provisioningRequests),
+      unreadable,
+      truncated: page.truncated,
+    });
+  }
+
+  /**
+   * Whether the caller may read a pending provisioning request: only its initiating actor,
+   * holding the grants that its status read checks (`authorizeProvisioningRecord`). The plan
+   * checks that a status read also runs are admission, not authorization, so they are skipped;
+   * a stored plan that no longer parses is not named.
+   */
+  private async canReadProvisioningRequest(
+    state: Pick<PlatformReadView, "provisioning">,
+    principalId: string,
+    namespaceId: string,
+    workId: string,
+    allowed: (action: AuthorizationRequest["action"], resource: ResourceRef) => Promise<boolean>,
+  ): Promise<boolean> {
+    const record = await state.provisioning.findByWorkId(workId);
+    if (
+      record === undefined ||
+      record.namespaceId !== namespaceId ||
+      record.actorId !== principalId
+    ) {
+      return false;
+    }
+    let plan: ReturnType<OpenClawController["provisioningPlan"]>;
+    try {
+      plan = this.provisioningPlan(record);
+    } catch (error) {
+      if (error instanceof DependencyUnavailableError) {
+        throw error;
+      }
+      return false;
+    }
+    const harnessAuth = plan.harnessAuth;
+    const checks: [AuthorizationRequest["action"], ResourceRef][] = [
+      ["create", { kind: "agent", namespaceId, id: namespaceId }],
+      ["create", { kind: "configuration", namespaceId, id: namespaceId }],
+      ["administer", { kind: "installation", id: this.installation.id }],
+      ...(record.agentId === undefined
+        ? []
+        : (["read", "operate", "deploy"] as const).map(
+            (action): [AuthorizationRequest["action"], ResourceRef] => [
+              action,
+              { kind: "agent", namespaceId, id: record.agentId as string },
+            ],
+          )),
+      ...(record.configurationId === undefined
+        ? []
+        : (["read", "update"] as const).map(
+            (action): [AuthorizationRequest["action"], ResourceRef] => [
+              action,
+              { kind: "configuration", namespaceId, id: record.configurationId as string },
+            ],
+          )),
+      ...Object.values(plan.configuration.secretBindings ?? {}).map(
+        (binding): [AuthorizationRequest["action"], ResourceRef] => ["operate", binding.source],
+      ),
+      ...(harnessAuth?.method === "api_key" ||
+      harnessAuth?.method === "codex_pat" ||
+      harnessAuth?.method === "oauth"
+        ? [["operate", harnessAuth.source] as [AuthorizationRequest["action"], ResourceRef]]
+        : []),
+      ...(harnessAuth?.method === "chatgpt_service_account"
+        ? [
+            [
+              "read",
+              { kind: "service_account", namespaceId, id: harnessAuth.serviceAccountId },
+            ] as [AuthorizationRequest["action"], ResourceRef],
+          ]
+        : []),
+    ];
+    for (const [action, resource] of checks) {
+      if (!(await allowed(action, resource))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   private authorizationAuthority(principalId: string): IAMDriver {
     if (!isNonEmptyString(principalId)) {
       throw new AuthorizationDeniedError("The acting identity is unavailable.");
@@ -7360,7 +7590,7 @@ export class OpenClawController {
         throw new ScopeViolationError("The provisioning plan is invalid.");
       }
       const name = planRecord?.name;
-      if (!isNonEmptyString(name) || !validName(name)) {
+      if (!isName(name)) {
         throw new ScopeViolationError("The provisioning Agent name is invalid.");
       }
       if (plan.harnessAuth === null || plan.harnessAuth.method === "runtime") {
@@ -8200,6 +8430,21 @@ export class OpenClawController {
       throw new IAMPolicyValidationError(
         "/permissions",
         unsupportedPermissionsMessage(unsupported),
+      );
+    }
+    // A create Permission would be stored and then refused by every binding request
+    // (assertAccessBindingRoleApplies), so the Role is refused here instead.
+    const firstCreate = checked.findIndex((permission) => permission.action === "create");
+    if (firstCreate !== -1) {
+      throw new IAMPolicyValidationError(
+        `/permissions/${firstCreate}/action`,
+        fittedList(
+          "Namespace IAM Roles cannot grant create Permissions: ",
+          checked
+            .filter((permission) => permission.action === "create")
+            .map((permission) => `${permission.resourceKind}:create`),
+          `. ${NAMESPACE_POLICY_CREATE_REASON}; omit them from the Role.`,
+        ),
       );
     }
     return Object.freeze(checked);

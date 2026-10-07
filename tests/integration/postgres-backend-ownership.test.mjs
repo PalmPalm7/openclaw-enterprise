@@ -19,7 +19,7 @@ import {
   startBackendlessDevelopmentServer,
   workspaceId,
 } from "../helpers/postgres-backend-state.mjs";
-import { availablePort } from "../helpers/available-port.mjs";
+import { reservePort } from "../helpers/available-port.mjs";
 import { stopProcess } from "../helpers/stop-process.mjs";
 import { waitFor } from "../helpers/wait-for.mjs";
 
@@ -96,7 +96,11 @@ test(
   "development API starts with stale Backend references and permits repair through Agent update",
   { ...requiresPostgres, timeout: 60_000 },
   async (context) => {
-    const port = await availablePort();
+    // The port is part of the auth base URL. Hold it until the child binds it, and again
+    // across the restart, so no other socket takes it in between.
+    let reservation = await reservePort();
+    context.after(() => reservation.release());
+    const { port } = reservation;
     const origin = `http://127.0.0.1:${port}`;
     const email = "postgres-admin@openclaw.local";
     const password = "postgres-development-password";
@@ -109,7 +113,7 @@ test(
       installationName: "PostgreSQL Backend repair integration",
     });
     let server = await startBackendlessDevelopmentServer(context, {
-      port,
+      reservation,
       origin,
       authSecret,
       configurationRoot: fixture.configurationRoot,
@@ -148,6 +152,7 @@ test(
     );
     assert.equal(agent.response.status, 201);
 
+    reservation = await reservePort({ port });
     await stopProcess(server.child);
     await fixture.pool.query(
       "UPDATE occ.agents SET backend_id = $1 WHERE namespace_id = $2 AND id = $3",
@@ -155,7 +160,7 @@ test(
     );
 
     server = await startBackendlessDevelopmentServer(context, {
-      port,
+      reservation,
       origin,
       authSecret,
       configurationRoot: fixture.configurationRoot,

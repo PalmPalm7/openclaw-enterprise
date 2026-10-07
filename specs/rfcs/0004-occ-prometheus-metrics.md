@@ -1,4 +1,6 @@
 ---
+author: russellb
+implementation_status: Implemented
 status: Accepted
 status_note: "The linked implementation plan identifies this as the accepted metrics proposal; runtime and cluster acceptance remain separate."
 ---

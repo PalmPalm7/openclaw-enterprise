@@ -1,4 +1,6 @@
 ---
+author: kevinlin-openai
+implementation_status: Implemented
 status: Proposed
 status_note: "Original proposal status retained; later delivery evidence and an approved embedded-activation amendment remain in the body."
 ---
