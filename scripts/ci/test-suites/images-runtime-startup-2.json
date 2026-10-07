@@ -20,7 +20,7 @@
         "runtime image Codex Harness exits promptly on SIGTERM in every startup phase",
         "runtime image embedded Gateway exits promptly on SIGTERM in every startup phase",
         "runtime image dedicated Gateway exits promptly on SIGTERM while it waits for its Harness",
-        "runtime image omits inactive Slack approvers and checks native compatibility before gateway launch"
+        "runtime image reconnects an ephemeral native worker from an expired replayed setup code"
       ]
     },
     {

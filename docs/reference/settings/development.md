@@ -57,9 +57,12 @@ worker require initialized state and do not read those credentials or output.
 When `OCC_DEVELOPMENT_STATE_DIRECTORY` is unset, the state directory is the
 launching process's temporary directory plus `openclaw-development`. On Linux
 that temporary directory is `TMPDIR` if the launching process set it, and
-`/tmp` if `TMPDIR` is unset. The launcher resolves symlinks in the temporary
-directory once. An explicit path is used as given and is not placed under the
-temporary directory.
+`/tmp` if `TMPDIR` is unset. On macOS it is the per-user `TMPDIR`. The launcher
+resolves symlinks in the temporary directory once, so the macOS default is
+`/private/var/folders/<id>/T/openclaw-development`. An explicit path is used as
+given and is not placed under the temporary directory. Its parent must not
+contain symlinks, so on macOS, where `/tmp` links to `/private/tmp`, use
+`/private/tmp/<name>`.
 
 Generate `OCC_AUTH_SECRET` with `openssl rand -hex 32`; do not commit it, log
 it, or reuse another installation's secret. Local `.env` files are ignored by
