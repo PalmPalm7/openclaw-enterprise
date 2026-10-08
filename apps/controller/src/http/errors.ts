@@ -31,6 +31,7 @@ import {
   RuntimeCredentialsForbiddenByClusterError,
   RuntimeLogsError,
   ScopeViolationError,
+  SecretBindingDriverError,
   SecretBindingValidationError,
   SecretValueError,
   type RuntimeLogsErrorCode,
@@ -718,6 +719,10 @@ export function requestFailure(error: unknown): RequestFailure {
       "DEPENDENCY_UNAVAILABLE",
       "The operation outcome is unknown. Do not retry automatically; inspect current state before a deliberate new action.",
     );
+  }
+  if (error instanceof SecretBindingDriverError) {
+    // A fixed message naming the fix; raised only after the Secret's grant and lookup.
+    return failure(503, "DEPENDENCY_UNAVAILABLE", error.message);
   }
   if (isDependencyUnavailable(error)) {
     return failure(503, "DEPENDENCY_UNAVAILABLE", "A required platform dependency is unavailable.");

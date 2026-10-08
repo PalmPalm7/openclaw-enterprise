@@ -167,6 +167,7 @@ import {
   RuntimeLogsForbiddenByClusterError,
   RuntimeLogsSandboxNotFoundError,
   ScopeViolationError,
+  SecretBindingDriverError,
   SecretBindingValidationError,
   SecretReferencedError,
   SecretValueError,
@@ -289,6 +290,7 @@ export {
   RuntimeLogsSandboxNotFoundError,
   SandboxRevisionUnsupportedError,
   ScopeViolationError,
+  SecretBindingDriverError,
   SecretBindingValidationError,
   SecretValueError,
   TransientDependencyError,
@@ -5556,6 +5558,10 @@ export class OpenClawController {
       } else if (requestedAuth !== undefined) {
         this.assertHarnessSourceListed(agent.credentialSources ?? [], requestedAuth);
       }
+      // Unlike the Agent's own bindings above, the named Configuration's Secret bindings get the
+      // full check even when `configurationId` is unchanged: deploy needs them usable, and only a
+      // Configuration write (or naming another Configuration) can replace them, so loosening this
+      // would not unblock the Agent. SecretBindingDriverError names that fix.
       const secretBindings = this.bindings(configuration.secretBindings);
       await this.authorizeBindings(state, principalId, namespace.id, secretBindings);
       const backendId = this.backendId(input.backendId, agent.backendId);
@@ -7040,7 +7046,11 @@ export class OpenClawController {
       if (!secret) {
         throw new ScopeViolationError("The Secret does not belong to the exact Namespace.");
       }
-      this.secretDriver(secret.driverId);
+      try {
+        this.secretDriver(secret.driverId);
+      } catch {
+        throw new SecretBindingDriverError();
+      }
       secrets.set(secret.id, secret);
     }
     return Object.freeze([...secrets.values()]);

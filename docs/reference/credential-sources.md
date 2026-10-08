@@ -232,8 +232,8 @@ deleted, and its referenced Secrets cannot be deleted.
 | `404 NOT_FOUND`                         | The source, Secret, or type is not in the exact Namespace or catalog, or a catalog field is invalid; or the Agent's active revision does not use the source or has no withdrawal for it. |
 | `409 NAMESPACE_NOT_READY`               | The Namespace is not `ready`.                                                                                                                                                            |
 | `409 RESOURCE_CONFLICT`                 | The source is still referenced, not `ready` for an update, or changed during the request; the Agent has no active revision to withdraw from; or sources need a Sandbox Driver.           |
-| `409 CREDENTIAL_GATEWAY_NOT_CONFIGURED` | Registration or Agent binding on an Installation that selects no Credential Gateway.                                                                                                     |
-| `503 DEPENDENCY_UNAVAILABLE`            | The selected Credential Gateway or the Secret Driver is unavailable, or the gateway call failed.                                                                                         |
+| `409 CREDENTIAL_GATEWAY_NOT_CONFIGURED` | Registration, Agent binding, or deploying an Agent that binds a source, on an Installation that selects no Credential Gateway.                                                           |
+| `503 DEPENDENCY_UNAVAILABLE`            | The selected Credential Gateway or the Secret Driver is unavailable, the gateway call failed, or the source was registered through a previously selected gateway.                        |
 
 ## Related
 

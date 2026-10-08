@@ -97,6 +97,21 @@ export class DependencyUnavailableError extends AuthorizationDeniedError {
 }
 
 /**
+ * A Configuration Secret binding the selected Secret Driver cannot serve, typically a Secret
+ * stored through a driver the Installation no longer selects. Raised only after the caller's
+ * `operate` grant and the Secret lookup, so it reveals nothing a 403 or 404 hides. Only a
+ * Configuration write can replace the binding, so the fixed message says so.
+ */
+export class SecretBindingDriverError extends DependencyUnavailableError {
+  constructor() {
+    super(
+      "The selected Secret Driver is unavailable or does not own a Secret the Configuration binds. Bind only Secrets stored through the selected driver: update the Configuration's secretBindings, or assign the Agent another Configuration.",
+    );
+    this.name = "SecretBindingDriverError";
+  }
+}
+
+/**
  * A running Agent has no active revision yet (its first deployment, or a redeploy after a
  * stop, is still activating). A lifecycle state, not an outage; it stays a
  * DependencyUnavailableError so callers that need a revision still answer 503.
