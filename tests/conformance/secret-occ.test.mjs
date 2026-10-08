@@ -1058,7 +1058,7 @@ test("after a Secret Driver change an Agent update and deploy wait for its Confi
   const configurationFix = (error) => {
     assert.ok(error instanceof SecretBindingDriverError, `${error.name}: ${error.message}`);
     assert.ok(error instanceof DependencyUnavailableError);
-    assert.match(error.message, /Update the Configuration's secretBindings/);
+    assert.match(error.message, /update the Configuration's secretBindings/);
     return true;
   };
   await assert.rejects(update(administrator), configurationFix);
@@ -1070,6 +1070,25 @@ test("after a Secret Driver change an Agent update and deploy wait for its Confi
       values: configurationValues(),
     }),
     configurationFix,
+  );
+  // A Secret the Namespace does not hold stays a scope miss, not this 503.
+  await assert.rejects(
+    controller.updateConfiguration(administrator, {
+      namespaceId: namespace.id,
+      configurationId: configuration.id,
+      values: configurationValues(),
+      secretBindings: {
+        GATEWAY_TOOL_TOKEN: {
+          source: {
+            kind: "secret",
+            namespaceId: namespace.id,
+            id: "sec_00000000-0000-4000-8000-00000000ffff",
+          },
+        },
+      },
+    }),
+    (error) =>
+      error instanceof ScopeViolationError && !(error instanceof DependencyUnavailableError),
   );
 
   // Grants still answer first: agent:update, then operate on the bound Secret.

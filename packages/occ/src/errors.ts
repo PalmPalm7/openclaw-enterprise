@@ -105,7 +105,7 @@ export class DependencyUnavailableError extends AuthorizationDeniedError {
 export class SecretBindingDriverError extends DependencyUnavailableError {
   constructor() {
     super(
-      "The selected Secret Driver is unavailable or does not own a Secret the Configuration binds. Update the Configuration's secretBindings to Secrets stored through the selected driver.",
+      "The selected Secret Driver is unavailable or does not own a Secret the Configuration binds. Bind only Secrets stored through the selected driver: update the Configuration's secretBindings, or assign the Agent another Configuration.",
     );
     this.name = "SecretBindingDriverError";
   }

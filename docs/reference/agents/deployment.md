@@ -72,7 +72,8 @@ naming it again fails with `503`, and so does deploying with it. The named
 Configuration's Secret bindings get the full check on every update, even when
 `configurationId` is unchanged: until that Configuration's `secretBindings`
 name Secrets stored through the selected driver, updates and deploys fail with
-`503` and a message that says so.
+`503` and a message that says so. Updating that Configuration, or naming another
+one, resolves it.
 See the
 [Harness execution topology flow](../../flows/harness-execution-topology.md) for
 runtime selection, identity boundaries, and activation.

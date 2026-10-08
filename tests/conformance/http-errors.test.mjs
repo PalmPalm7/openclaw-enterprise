@@ -704,7 +704,7 @@ const cases = [
       status: 503,
       code: "DEPENDENCY_UNAVAILABLE",
       message:
-        "The selected Secret Driver is unavailable or does not own a Secret the Configuration binds. Update the Configuration's secretBindings to Secrets stored through the selected driver.",
+        "The selected Secret Driver is unavailable or does not own a Secret the Configuration binds. Bind only Secrets stored through the selected driver: update the Configuration's secretBindings, or assign the Agent another Configuration.",
     },
   ],
   [

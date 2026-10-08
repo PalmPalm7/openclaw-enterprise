@@ -49,8 +49,8 @@ including retained bindings when PATCH omits `secretBindings`. Creating or
 updating an Agent assignment to a bound Configuration requires the normal Agent
 mutation permission and `operate` on each exact Secret. Each check also requires
 the selected SecretDriver to own the Secret: after the Installation selects
-another SecretDriver, a write that keeps an old binding, and every update or
-deployment of an Agent assigned to that Configuration, fails with `503` and a
+another SecretDriver, a write that keeps an old binding, and every create,
+update, or deployment of an Agent assigned to that Configuration, fails with `503` and a
 message naming the fix. Update the Configuration with replacement
 `secretBindings`, or assign the Agent another Configuration. Namespace membership,
 Configuration access, Agent access, or possession of a ref does not grant
