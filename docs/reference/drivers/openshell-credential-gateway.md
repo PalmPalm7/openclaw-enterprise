@@ -57,6 +57,19 @@ image that may carry [tool sources](../credential-sources.md#bind-a-source-to-an
 to their endpoints, such as `/usr/bin/curl`. Without it the catalog omits
 `bearer-token`.
 
+Changing either list rewrites existing profiles lazily, not at startup. A
+source's profile changes on its next update or on the next deployment or repair
+of a revision that binds it; until that write succeeds, the deployment stays
+pending. OpenShell builds Sandbox policy from the stored profile, so a narrower
+list then applies to running Sandboxes within seconds. Until then a removed
+binary keeps access; to cut it at once, withdraw the source or delete it. During
+a controller rollout, replicas with different lists may rewrite a profile in
+turn; the last write wins. Removing `toolBinaries` entirely blocks
+registrations, updates, deployments, and repairs of `bearer-token` sources,
+because OpenShell treats an empty binary list as any binary. Existing providers
+and profiles stay until you withdraw or delete them; status and deletion keep
+working.
+
 Startup rejects the selection when:
 
 - the Installation does not select the bundled Kubernetes Compute Driver;
@@ -66,7 +79,8 @@ Startup rejects the selection when:
 
 Both the API and the worker connect to the gateway with the Backend's
 credentials. The API registers and deletes providers; the worker creates
-Sandboxes and reads attachment status. Allow both to reach the gateway.
+Sandboxes, updates provider profiles, and reads attachment status. Allow both to
+reach the gateway.
 
 ## Source-type catalog
 
@@ -105,7 +119,7 @@ Workspace:
   `authorization` header, and binds it to `api.openai.com:443` with `rest`
   protocol and path `/v1/**`, for the configured binaries only. A digest
   annotation records the profile content; a configuration change updates the
-  profile on the next registration.
+  profile on the next registration, update, or deployment.
 - **Provider profile per `bearer-token` source.** Its ID equals the source's
   provider name. It exposes the token as the source's `env_var` and binds it to
   the source's `host`, `port`, and `path` with `rest` protocol, for
@@ -123,7 +137,8 @@ Workspace:
 missing, and `failed` when a provider with that name is not owned by the source.
 
 `updateSource` requires the existing provider to be OCC-owned for the exact
-source, then calls `UpdateProvider` with the new credential values.
+source, rewrites the source's profile when the configured binaries changed,
+then calls `UpdateProvider` with the new credential values.
 `UpdateProvider` merges non-empty values into the provider, so the driver
 rejects an empty value rather than silently keep the old one. OpenShell gives
 the new value only to processes started after the update, so a running Harness
@@ -133,9 +148,9 @@ keeps the previous value until it restarts.
 provider of the profile's type remains, it also deletes the profile, because
 OpenShell cannot delete a Workspace that still holds profiles.
 
-For a revision, `attachForRevision` returns each source's provider name. It
-fails when two of the revision's sources would use the same environment
-variable. The
+For a revision, `attachForRevision` brings each source's profile up to date and
+returns its provider name. It fails when two of the revision's sources would use
+the same environment variable. The
 OpenShell SandboxDriver appends those names to `SandboxSpec.providers`.
 `attachmentStatus` calls `GetSandboxProviderStatus` for each provider and maps
 OpenShell readiness states to `ready`, `withheld`, `revoked`, `failed`, or
