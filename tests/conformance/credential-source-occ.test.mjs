@@ -1459,7 +1459,8 @@ test("binding without a Credential Gateway is a 409 after operate, whether or no
     undefined,
   );
 
-  // An Agent whose stored binding outlived the gateway: deploy and any update name the fix.
+  // An Agent whose stored binding outlived the gateway: deploy names the fix, and an update
+  // that binds nothing new still needs operate on every bound source but no gateway.
   await controller.transact((unit) =>
     unit.agents.updateConfiguration(
       namespace.id,
@@ -1475,26 +1476,32 @@ test("binding without a Credential Gateway is a 409 after operate, whether or no
       [{ sourceId: stored.id }],
     ),
   );
-  const storedWrites = {
-    deploy: (principalId) =>
-      controller.deployAgent(
-        principalId,
-        { namespaceId: namespace.id, agentId: agent.id },
-        resolveApprovedDevelopmentHarness,
-      ),
-    "unrelated update": (principalId) =>
-      controller.updateAgent(principalId, {
-        namespaceId: namespace.id,
-        agentId: agent.id,
-        configurationId: agent.configurationId,
-      }),
-  };
-  for (const [name, write] of Object.entries(storedWrites)) {
-    const administered = await outcome(write, administrator);
-    assert.equal(administered.gateway, true, name);
-    assert.equal(administered.status, 409, name);
-    assert.equal((await outcome(write, editor)).status, 403, name);
-  }
+  const deploy = (principalId) =>
+    controller.deployAgent(
+      principalId,
+      { namespaceId: namespace.id, agentId: agent.id },
+      resolveApprovedDevelopmentHarness,
+    );
+  const administered = await outcome(deploy, administrator);
+  assert.equal(administered.gateway, true);
+  assert.equal(administered.status, 409);
+  assert.equal((await outcome(deploy, editor)).status, 403);
+  const update = (principalId, fields = {}) =>
+    controller.updateAgent(principalId, {
+      namespaceId: namespace.id,
+      agentId: agent.id,
+      configurationId: agent.configurationId,
+      ...fields,
+    });
+  const drop = { harnessAuth: { method: "runtime" }, credentialSources: [] };
+  assert.equal((await outcome(update, editor)).status, 403);
+  assert.equal((await outcome((principalId) => update(principalId, drop), editor)).status, 403);
+  assert.deepEqual((await update(administrator)).credentialSources, [{ sourceId: stored.id }]);
+  const dropped = await update(administrator, drop);
+  assert.deepEqual(
+    { harnessAuth: dropped.harnessAuth, credentialSources: dropped.credentialSources },
+    { harnessAuth: { method: "runtime" }, credentialSources: undefined },
+  );
 });
 
 test("deploying credential sources without a Sandbox Driver is a 409 naming the driver, after agent:deploy", async () => {
@@ -2031,6 +2038,130 @@ test("binding refuses a missing, deleting, other-Namespace or foreign-gateway so
     (await controller.getAgent(administrator, namespace.id, agent.id)).credentialSources,
     undefined,
   );
+});
+
+test("after a Credential Gateway change an Agent update can drop the old sources but not keep them", async () => {
+  const { controller, dedicatedAgent, gateway, iamState, makeReady, modelSecret, namespace } =
+    await fixture();
+  await makeReady();
+  const model = await controller.createCredentialSource(administrator, {
+    namespaceId: namespace.id,
+    name: "openai-old",
+    type: "openai",
+    secrets: { api_key: (await modelSecret()).ref },
+  });
+  const registry = await controller.createCredentialSource(administrator, {
+    namespaceId: namespace.id,
+    name: "registry-old",
+    type: "registry",
+    config: { host: "registry-old.example.com" },
+  });
+  const agent = await dedicatedAgent();
+  const update = (principalId, fields = {}) =>
+    controller.updateAgent(principalId, {
+      namespaceId: namespace.id,
+      agentId: agent.id,
+      configurationId: agent.configurationId,
+      ...fields,
+    });
+  const oldHarnessAuth = { method: "credential_source", sourceId: model.id };
+  await update(administrator, {
+    harnessAuth: oldHarnessAuth,
+    credentialSources: [{ sourceId: model.id }, { sourceId: registry.id }],
+  });
+
+  // The Installation re-selects its Credential Gateway; the old sources stay stored and ready.
+  controller.registerDriver({ ...gateway, id: "credential-gateway-replacement" });
+  controller.selectDriver("credential_gateway", "credential-gateway-replacement");
+  const stored = async () => {
+    const current = await controller.getAgent(administrator, namespace.id, agent.id);
+    return { harnessAuth: current.harnessAuth, credentialSources: current.credentialSources };
+  };
+  const before = await stored();
+
+  // Keeping an old-gateway source bound is still refused: deploy could not admit it.
+  await assert.rejects(
+    update(administrator, { credentialSources: [{ sourceId: model.id }] }),
+    DependencyUnavailableError,
+  );
+  await assert.rejects(
+    update(administrator, {
+      harnessAuth: { method: "runtime" },
+      credentialSources: [{ sourceId: registry.id }],
+    }),
+    DependencyUnavailableError,
+  );
+  await assert.rejects(
+    update(administrator, { harnessAuth: oldHarnessAuth }),
+    DependencyUnavailableError,
+  );
+  assert.deepEqual(await stored(), before);
+
+  // Dropping a bound source still needs operate on it, and is denied before any lookup,
+  // including the lookup of a requested source that does not exist.
+  iamState.restrictions.push({
+    id: `deny-operate-${registry.id}`,
+    namespaceId: namespace.id,
+    action: "operate",
+    resourceKind: "credential_source",
+    resourceId: registry.id,
+    effect: "deny",
+  });
+  const drop = { harnessAuth: { method: "runtime" }, credentialSources: [] };
+  const missing = "cs_00000000-0000-4000-8000-00000000ffff";
+  const missingSource = {
+    harnessAuth: { method: "credential_source", sourceId: missing },
+    credentialSources: [{ sourceId: missing }],
+  };
+  for (const fields of [{}, drop, missingSource]) {
+    await assert.rejects(update(administrator, fields), (error) => {
+      assert.ok(error instanceof AuthorizationDeniedError);
+      assert.deepEqual(error.authorization.resource, {
+        kind: "credential_source",
+        namespaceId: namespace.id,
+        id: registry.id,
+      });
+      return true;
+    });
+    assert.equal(requestFailure(await update(editor, fields).catch((e) => e)).status, 403);
+  }
+  iamState.restrictions.length = 0;
+  assert.deepEqual(await stored(), before);
+
+  // An update that binds nothing new succeeds, and so does one that drops the old sources.
+  assert.deepEqual(
+    (await update(administrator, { executionMode: "dedicated" })).credentialSources,
+    [{ sourceId: model.id }, { sourceId: registry.id }],
+  );
+  // Leaving the list out keeps the old sources, which deploy admission still refuses.
+  const implicitlyKept = await update(administrator, { harnessAuth: { method: "runtime" } });
+  assert.deepEqual(implicitlyKept.credentialSources, before.credentialSources);
+  await assert.rejects(
+    controller.deployAgent(
+      administrator,
+      { namespaceId: namespace.id, agentId: agent.id },
+      resolveApprovedDevelopmentHarness,
+    ),
+    DependencyUnavailableError,
+  );
+  const dropped = await update(administrator, drop);
+  assert.deepEqual(
+    { harnessAuth: dropped.harnessAuth, credentialSources: dropped.credentialSources },
+    { harnessAuth: { method: "runtime" }, credentialSources: undefined },
+  );
+
+  // A source registered through the new gateway binds as usual.
+  const replacement = await controller.createCredentialSource(administrator, {
+    namespaceId: namespace.id,
+    name: "openai-new",
+    type: "openai",
+    secrets: { api_key: (await modelSecret()).ref },
+  });
+  const rebound = await update(administrator, {
+    harnessAuth: { method: "credential_source", sourceId: replacement.id },
+    credentialSources: [{ sourceId: replacement.id }],
+  });
+  assert.deepEqual(rebound.credentialSources, [{ sourceId: replacement.id }]);
 });
 
 test("deploy admission rechecks every listed source for the deployer, Sandbox and gateway catalog", async () => {
