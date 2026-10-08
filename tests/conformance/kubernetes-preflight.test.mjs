@@ -14,7 +14,7 @@ import {
   conformanceKubernetesOptions,
   createTestKubernetesComputeDriver,
 } from "../helpers/kubernetes-compute.mjs";
-import { availablePort } from "../helpers/available-port.mjs";
+import { refusingPort } from "../helpers/available-port.mjs";
 
 function driverForVersion(gitVersion) {
   const driver = createTestKubernetesComputeDriver("compute-kubernetes-preflight");
@@ -114,8 +114,9 @@ test("Kubernetes preflight rejects an invalid API server version response", asyn
 });
 
 test("Kubernetes preflight names the unreachable API server endpoint", async () => {
-  // A just-released loopback port refuses connections.
-  const port = await availablePort();
+  // A held loopback port refuses connections; a released one could be taken by a parallel test.
+  const refusing = await refusingPort();
+  const { port } = refusing;
   const directory = await mkdtemp(join(tmpdir(), "occ-kubernetes-preflight-"));
   try {
     const kubeconfigPath = join(directory, "kubeconfig");
@@ -181,6 +182,7 @@ test("Kubernetes preflight names the unreachable API server endpoint", async () 
       ],
     );
   } finally {
+    await refusing.release();
     await rm(directory, { recursive: true, force: true });
   }
 });
