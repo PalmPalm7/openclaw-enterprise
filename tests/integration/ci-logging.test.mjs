@@ -106,6 +106,7 @@ test("prepareLogging pulls the Collector image only when the engine lacks its di
       const pull = calls.findIndex(([command]) => command === "pull");
       const run = calls.findIndex(([command]) => command === "run");
       assert.equal(calls[inspect].at(-1), collectorImage);
+      assert.notEqual(run, -1);
       assert.ok(inspect < run);
       if (pulled) {
         assert.deepEqual(calls[pull], ["pull", collectorImage]);
@@ -118,34 +119,45 @@ test("prepareLogging pulls the Collector image only when the engine lacks its di
 });
 
 test("prepareLogging stops when the engine cannot answer the image inspect", async (t) => {
-  const root = await fixture(t);
-  const calls = [];
-  const execFile = async (command, args) => {
-    calls.push(args);
-    if (args[0] === "image" && args[1] === "inspect") {
-      throw Object.assign(new Error("inspect timed out"), { timedOut: true, stderr: "" });
-    }
-    return { stdout: "container-id\n", stderr: "" };
-  };
-  await assert.rejects(
-    prepareLogging({
-      laneName: "logging-collector",
-      directory: root,
-      env: {
-        OCC_DOCKER_BIN: "docker",
-        OCC_TEST_LOGGING_COLLECTOR_IMAGE: collectorImage,
-        OCC_CI_OTEL_BACKEND_BIND_ADDRESS: "127.0.0.1",
-      },
-      execFile,
-      registerResource: async (kind, resource) => ({ id: "resource-1", kind, ...resource }),
-      waitForReady: false,
-    }),
-    /inspect timed out/,
-  );
-  assert.equal(
-    calls.some(([command]) => command === "pull" || command === "run"),
-    false,
-  );
+  // Only a missing image reads as absent; a hung or unreachable engine is not pulled past.
+  for (const { name, failure } of [
+    { name: "inspect timeout", failure: { timedOut: true, stderr: "" } },
+    {
+      name: "engine unreachable",
+      failure: { stderr: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock." },
+    },
+  ]) {
+    await t.test(name, async (t) => {
+      const root = await fixture(t);
+      const calls = [];
+      const execFile = async (command, args) => {
+        calls.push(args);
+        if (args[0] === "image" && args[1] === "inspect") {
+          throw Object.assign(new Error(`${name} at inspect`), failure);
+        }
+        return { stdout: "container-id\n", stderr: "" };
+      };
+      await assert.rejects(
+        prepareLogging({
+          laneName: "logging-collector",
+          directory: root,
+          env: {
+            OCC_DOCKER_BIN: "docker",
+            OCC_TEST_LOGGING_COLLECTOR_IMAGE: collectorImage,
+            OCC_CI_OTEL_BACKEND_BIND_ADDRESS: "127.0.0.1",
+          },
+          execFile,
+          registerResource: async (kind, resource) => ({ id: "resource-1", kind, ...resource }),
+          waitForReady: false,
+        }),
+        new RegExp(`${name} at inspect`),
+      );
+      assert.equal(
+        calls.some(([command]) => command === "pull" || command === "run"),
+        false,
+      );
+    });
+  }
 });
 
 test("prepareLogging installs k3d Collector from the canonical Helm template", async (t) => {
