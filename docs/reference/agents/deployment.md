@@ -68,7 +68,11 @@ Backend association. For the current `harnessAuth` source, an update checks only
 the caller's grant (Secret or credential source `operate`, account `read`) and
 reads no record. After the Installation selects another Secret Driver or
 Credential Gateway, an update can still omit, clear, or replace the old binding;
-naming it again fails with `503`, and so does deploying with it.
+naming it again fails with `503`, and so does deploying with it. The named
+Configuration's Secret bindings get the full check on every update, even when
+`configurationId` is unchanged: until that Configuration's `secretBindings`
+name Secrets stored through the selected driver, updates and deploys fail with
+`503` and a message that says so.
 See the
 [Harness execution topology flow](../../flows/harness-execution-topology.md) for
 runtime selection, identity boundaries, and activation.

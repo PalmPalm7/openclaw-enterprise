@@ -11,6 +11,7 @@ import {
   OpenClawController,
   ResourceConflictError,
   ScopeViolationError,
+  SecretBindingDriverError,
   SecretValueError,
 } from "../../packages/occ/src/index.ts";
 import { createTestConfigurationDriver } from "../helpers/configuration-driver.mjs";
@@ -1014,6 +1015,113 @@ test("after a Secret Driver change an Agent update can replace the old Harness S
   });
   const harnessAuth = { method: "api_key", source: current.ref };
   assert.deepEqual((await update(administrator, { harnessAuth })).harnessAuth, harnessAuth);
+});
+
+test("after a Secret Driver change an Agent update and deploy wait for its Configuration's Secret bindings", async () => {
+  const { agent, controller, grantAgentSecretOperate, iamState, makeReady, namespace } =
+    await fixture();
+  await makeReady();
+  const old = await controller.createSecret(administrator, {
+    namespaceId: namespace.id,
+    name: "gateway-tool-token",
+    value: "synthetic-old-token",
+  });
+  grantAgentSecretOperate(agent, old);
+  const configuration = await controller.createConfiguration(administrator, {
+    namespaceId: namespace.id,
+    kind: "agent",
+    values: configurationValues(),
+    secretBindings: { GATEWAY_TOOL_TOKEN: { source: old.ref } },
+  });
+  const update = (principalId, fields = {}) =>
+    controller.updateAgent(principalId, {
+      namespaceId: namespace.id,
+      agentId: agent.id,
+      configurationId: configuration.id,
+      ...fields,
+    });
+  const deploy = () =>
+    controller.deployAgent(
+      administrator,
+      { namespaceId: namespace.id, agentId: agent.id },
+      resolveApprovedDevelopmentHarness,
+    );
+  // Without Harness authentication, only the Configuration binds an old-driver Secret.
+  await update(administrator, { harnessAuth: null });
+
+  const replacement = createTestSecretDriver({ id: "secret-replacement" });
+  controller.registerDriver(replacement);
+  controller.selectDriver("secret", replacement.id);
+
+  // Every update names the Configuration, so even an unchanged one is refused, as deploy is,
+  // with a message that names the fix. Keeping the binding in a Configuration write fails too.
+  const configurationFix = (error) => {
+    assert.ok(error instanceof SecretBindingDriverError);
+    assert.ok(error instanceof DependencyUnavailableError);
+    assert.match(error.message, /Update the Configuration's secretBindings/);
+    return true;
+  };
+  await assert.rejects(update(administrator), configurationFix);
+  await assert.rejects(deploy(), configurationFix);
+  await assert.rejects(
+    controller.updateConfiguration(administrator, {
+      namespaceId: namespace.id,
+      configurationId: configuration.id,
+      values: configurationValues(),
+    }),
+    configurationFix,
+  );
+
+  // Grants still answer first: agent:update, then operate on the bound Secret.
+  await assert.rejects(update(deployer), (error) => {
+    assert.ok(!(error instanceof DependencyUnavailableError));
+    assert.deepEqual(error.authorization, {
+      action: "update",
+      resource: { kind: "agent", id: agent.id, namespaceId: namespace.id },
+    });
+    return true;
+  });
+  iamState.restrictions.push({
+    id: "deny-operate-old-gateway-secret",
+    namespaceId: namespace.id,
+    action: "operate",
+    resourceKind: "secret",
+    resourceId: old.id,
+    effect: "deny",
+  });
+  await assert.rejects(update(administrator), (error) => {
+    assert.ok(!(error instanceof DependencyUnavailableError));
+    assert.deepEqual(error.authorization, { action: "operate", resource: old.ref });
+    return true;
+  });
+  iamState.restrictions.length = 0;
+
+  // Naming another Configuration checks only that one.
+  const unbound = await controller.createConfiguration(administrator, {
+    namespaceId: namespace.id,
+    kind: "agent",
+    values: configurationValues(),
+  });
+  assert.equal(
+    (await update(administrator, { configurationId: unbound.id })).configurationId,
+    unbound.id,
+  );
+
+  // Once the Configuration binds a Secret stored through the selected driver, both proceed.
+  const current = await controller.createSecret(administrator, {
+    namespaceId: namespace.id,
+    name: "gateway-tool-token-current",
+    value: "synthetic-current-token",
+  });
+  grantAgentSecretOperate(agent, current);
+  await controller.updateConfiguration(administrator, {
+    namespaceId: namespace.id,
+    configurationId: configuration.id,
+    values: configurationValues(),
+    secretBindings: { GATEWAY_TOOL_TOKEN: { source: current.ref } },
+  });
+  assert.equal((await update(administrator)).configurationId, configuration.id);
+  assert.equal((await deploy()).secretDriverId, replacement.id);
 });
 
 test("an Agent update needs read on its current ServiceAccount, before any lookup", async () => {
