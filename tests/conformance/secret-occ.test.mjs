@@ -1046,8 +1046,8 @@ test("after a Secret Driver change an Agent update and deploy wait for its Confi
       { namespaceId: namespace.id, agentId: agent.id },
       resolveApprovedDevelopmentHarness,
     );
-  // Without Harness authentication, only the Configuration binds an old-driver Secret.
-  await update(administrator, { harnessAuth: null });
+  // With runtime Harness authentication, only the Configuration binds an old-driver Secret.
+  await update(administrator, { harnessAuth: { method: "runtime" } });
 
   const replacement = createTestSecretDriver({ id: "secret-replacement" });
   controller.registerDriver(replacement);
@@ -1056,7 +1056,7 @@ test("after a Secret Driver change an Agent update and deploy wait for its Confi
   // Every update names the Configuration, so even an unchanged one is refused, as deploy is,
   // with a message that names the fix. Keeping the binding in a Configuration write fails too.
   const configurationFix = (error) => {
-    assert.ok(error instanceof SecretBindingDriverError);
+    assert.ok(error instanceof SecretBindingDriverError, `${error.name}: ${error.message}`);
     assert.ok(error instanceof DependencyUnavailableError);
     assert.match(error.message, /Update the Configuration's secretBindings/);
     return true;
