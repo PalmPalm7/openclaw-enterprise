@@ -61,7 +61,8 @@ An exit-0 `migration.checked` record reports one reviewed history shape:
 `preNamespaceDeletionTakeover`, `preRepositoryAccess`, `preRestrictionReadLogs`,
 `preOAuth`, `preCredentialWithdrawals`, `preBrokerReceiptFence`,
 `preModelProbeFailureCause`, `preProvisioningConfigurationRelease`, `preAdministratorCredentialSourceGrants`,
-`preCodexPatSources`, `preAgentCredentialSources`, or `completed`.
+`preCodexPatSources`, `preAgentCredentialSources`,
+`preCredentialWithdrawalRequester`, or `completed`.
 `prePresetsMain` means
 the exact canonical history through `0023_runtime_failure_timestamp_validation`;
 `main` also includes `0024_agent_presets`. `repositoryCredentials` adds

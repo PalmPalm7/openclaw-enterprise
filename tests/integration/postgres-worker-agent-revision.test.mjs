@@ -3409,6 +3409,7 @@ revisionTest(
     );
     assert.equal(replayed.state, "pending");
     assert.equal(replayed.requestedBy, fixture.actor.id);
+    assert.equal(replayed.requestedAt, recorded.requestedAt);
     assert.equal(replayed.withdrawalInProgress, true);
     const retry = await fixture.observerPool.query(
       `SELECT idempotency_key, actor_id FROM occ.controller_work
@@ -3929,8 +3930,9 @@ revisionTest(
     await strandWithdrawal(modelSourceId);
     const prepared = dispatched.length;
     await runMaintenance();
-    const modelWithdrawal = (await withdrawalWork())[1];
-    assert.ok(modelWithdrawal, "maintenance must queue the pending model withdrawal again");
+    const work = await withdrawalWork();
+    assert.equal(work.length, 2, "maintenance must queue the pending model withdrawal again");
+    const modelWithdrawal = work[1];
     await fixture.work(modelWithdrawal, "succeeded");
     assert.equal(await withdrawalState(modelSourceId), "revoked");
     await runMaintenance();
