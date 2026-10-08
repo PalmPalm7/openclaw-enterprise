@@ -66,6 +66,54 @@ test("prepareLogging registers an owned Collector backend before starting Docker
   assert.match(await readFile(result.artifacts.configPath, "utf8"), /path: \/out\/logs[.]jsonl/);
 });
 
+test("prepareLogging pulls the Collector image only when the engine lacks its digest", async (t) => {
+  // `docker pull` asks the registry even for a held digest; the logging-collector lane
+  // pulls the image in prepare, so a stalled registry must not reach the test timeout.
+  for (const { name, repoDigests, pulled } of [
+    { name: "held digest", repoDigests: [collectorImage], pulled: false },
+    {
+      name: "other digest",
+      repoDigests: [`registry.example/otelcol@sha256:${"b".repeat(64)}`],
+      pulled: true,
+    },
+    { name: "missing image", repoDigests: undefined, pulled: true },
+  ]) {
+    await t.test(name, async (t) => {
+      const root = await fixture(t);
+      const calls = [];
+      const execFile = async (command, args) => {
+        calls.push(args.slice(0, 2));
+        if (args[0] === "image" && args[1] === "inspect") {
+          if (repoDigests === undefined) {
+            throw Object.assign(new Error("inspect failed"), {
+              stderr: `Error response from daemon: No such image: ${collectorImage}`,
+            });
+          }
+          return { stdout: `${JSON.stringify(repoDigests)}\n`, stderr: "" };
+        }
+        return { stdout: "container-id\n", stderr: "" };
+      };
+      await prepareLogging({
+        laneName: "logging-collector",
+        directory: root,
+        env: {
+          OCC_DOCKER_BIN: "docker",
+          OCC_TEST_LOGGING_COLLECTOR_IMAGE: collectorImage,
+          OCC_CI_OTEL_BACKEND_BIND_ADDRESS: "127.0.0.1",
+        },
+        execFile,
+        registerResource: async (kind, resource) => ({ id: "resource-1", kind, ...resource }),
+        waitForReady: false,
+      });
+      assert.equal(
+        calls.some(([command]) => command === "pull"),
+        pulled,
+      );
+      assert.ok(calls.some(([command]) => command === "run"));
+    });
+  }
+});
+
 test("prepareLogging installs k3d Collector from the canonical Helm template", async (t) => {
   const root = await fixture(t);
   const clusterName = "openclaw-k8s-oteltest";

@@ -69,3 +69,42 @@ export async function pullImage(
     }
   }
 }
+
+// True when the local engine already holds `image`, an image@sha256 reference, under
+// that repository digest. The digest names the content, so the local copy is what a
+// pull would fetch. Any other answer (no such image, unreadable output, no digest)
+// is false, and the caller pulls.
+export async function hasLocalRepoDigest(image, { execFile, docker = "docker" } = {}) {
+  const digest = /@sha256:([a-f0-9]{64})$/i.exec(image ?? "")?.[1]?.toLowerCase();
+  if (!digest) {
+    return false;
+  }
+  let repoDigests;
+  try {
+    const { stdout } = await execFile(
+      docker,
+      ["image", "inspect", "--format", "{{json .RepoDigests}}", image],
+      { timeoutMs: 60_000 },
+    );
+    repoDigests = JSON.parse(String(stdout).trim() || "[]");
+  } catch {
+    return false;
+  }
+  return (
+    Array.isArray(repoDigests) &&
+    repoDigests.some(
+      (reference) =>
+        typeof reference === "string" && reference.toLowerCase().endsWith(`@sha256:${digest}`),
+    )
+  );
+}
+
+// pullImage, skipped when hasLocalRepoDigest finds the pinned image. `docker pull`
+// asks the registry again even for a digest the engine holds, so a stalled registry
+// would otherwise delay a step whose image a lane already pulled.
+export async function ensureImage(image, options = {}) {
+  if (await hasLocalRepoDigest(image, options)) {
+    return undefined;
+  }
+  return pullImage(image, options);
+}
