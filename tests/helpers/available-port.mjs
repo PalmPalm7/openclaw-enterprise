@@ -68,16 +68,33 @@ export function reservedPortArgs(reservation) {
 }
 
 // Holds a port on `host` that refuses connections until release(). A connected client
-// socket stays bound to it, so nothing listens there, while the kernel skips the port
-// for every other bind to port 0 and every outgoing connection's local port. Only an
-// explicit bind to this port number could take it.
+// socket stays bound to it and nothing listens there. On Linux the kernel skips the port
+// for every bind to port 0 that could accept on `host` and for every outgoing
+// connection's local port, so only an explicit bind to this number could take it.
 export async function refusingPort({ host = "127.0.0.1" } = {}) {
-  const server = createServer();
+  // Every accepted socket is kept: a stray connection can reach the listener first.
+  const peers = new Set();
+  const server = createServer((socket) => {
+    socket.on("error", () => {});
+    peers.add(socket);
+  });
   server.listen(0, host);
   await once(server, "listening");
   // An explicit local address makes Node bind the client before it connects.
   const holder = connect({ port: server.address().port, host, localAddress: host });
-  const [[peer]] = await Promise.all([once(server, "connection"), once(holder, "connect")]);
+  try {
+    await once(holder, "connect");
+    // Closing the listener before it accepts the held connection would reset it.
+    while (![...peers].some((socket) => socket.remotePort === holder.localPort)) {
+      await once(server, "connection");
+    }
+  } catch (error) {
+    holder.destroy();
+    server.close();
+    throw error;
+  }
+  // A reset of the held pair must not crash the test file.
+  holder.on("error", () => {});
   // Stop listening; the held connection keeps the client's port bound.
   const closed = new Promise((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));
@@ -88,7 +105,9 @@ export async function refusingPort({ host = "127.0.0.1" } = {}) {
     release() {
       released ??= (async () => {
         holder.destroy();
-        peer.destroy();
+        for (const socket of peers) {
+          socket.destroy();
+        }
         await closed;
       })();
       return released;
