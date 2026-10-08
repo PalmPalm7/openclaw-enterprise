@@ -2550,6 +2550,25 @@ export class PostgresPlatformState implements PlatformStateStore {
         }
         return saved;
       },
+      reassignCredentialWithdrawal: async (
+        namespaceId,
+        revisionId,
+        credentialSourceId,
+        request,
+      ) => {
+        if (!isNonEmptyString(request.requestedBy)) {
+          throw new ScopeViolationError("A credential withdrawal requester is missing.");
+        }
+        const updated = await client.query(
+          `UPDATE occ.credential_withdrawals SET requested_by = $4, requested_at = $5
+           WHERE namespace_id = $1 AND revision_id = $2 AND credential_source_id = $3
+             AND state = 'pending'`,
+          [namespaceId, revisionId, credentialSourceId, request.requestedBy, request.requestedAt],
+        );
+        return updated.rowCount === 1
+          ? findCredentialWithdrawal(namespaceId, revisionId, credentialSourceId)
+          : undefined;
+      },
       recordCredentialWithdrawalAttempt: async (
         namespaceId,
         revisionId,

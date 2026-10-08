@@ -6008,7 +6008,8 @@ export class OpenClawController {
   /**
    * Records a withdrawal of `credentialSourceId` from the Agent's active revision and queues
    * worker work to revoke it. A replay of a pending withdrawal queues another attempt only when
-   * no earlier attempt is still queued or running; a revoked withdrawal is returned unchanged.
+   * no earlier attempt is still queued or running, and that attempt runs on the replaying
+   * operator's authority; a revoked withdrawal is returned unchanged.
    */
   async withdrawAgentCredentialSource(
     principalId: string,
@@ -6032,7 +6033,8 @@ export class OpenClawController {
         );
       }
       const revision = await this.activeCredentialSourceRevision(state, agent, input);
-      const withdrawal = await state.credentialSources.requestCredentialWithdrawal(
+      const requestedAt = this.timestamp();
+      let withdrawal = await state.credentialSources.requestCredentialWithdrawal(
         Object.freeze({
           namespaceId: agent.namespaceId,
           agentId: agent.id,
@@ -6040,7 +6042,7 @@ export class OpenClawController {
           credentialSourceId: input.credentialSourceId,
           state: "pending",
           requestedBy: principalId,
-          requestedAt: this.timestamp(),
+          requestedAt,
         }),
       );
       if (
@@ -6050,6 +6052,23 @@ export class OpenClawController {
           revision.id,
         ))
       ) {
+        // The worker rechecks `agent:operate` for the recorded requester. An earlier requester
+        // may have lost it since, so the attempt this replay queues runs on the authority just
+        // checked above; otherwise nobody could ever complete the withdrawal.
+        if (withdrawal.requestedBy !== principalId) {
+          const reassigned = await state.credentialSources.reassignCredentialWithdrawal(
+            withdrawal.namespaceId,
+            withdrawal.revisionId,
+            withdrawal.credentialSourceId,
+            { requestedBy: principalId, requestedAt },
+          );
+          if (reassigned === undefined) {
+            throw new ResourceStateConflictError(
+              "The credential withdrawal changed during the request.",
+            );
+          }
+          withdrawal = reassigned;
+        }
         await this.record(state, {
           kind: "agent_revision",
           action: "reconcile",
