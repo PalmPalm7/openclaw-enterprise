@@ -1,10 +1,11 @@
 import { once } from "node:events";
-import { createServer } from "node:net";
+import { connect, createServer } from "node:net";
 
 // Returns a TCP port that was free on `host` and is released again before returning.
 // Bind it promptly: another process can take it in between. Pass the host the real
 // listener will bind (for example "0.0.0.0") so the check covers the same interfaces.
-// A just-released port also serves as a loopback port that refuses connections.
+// For a port that must refuse connections, use refusingPort(): a released port can be
+// taken by any listener that binds port 0, such as a test running in parallel.
 export async function availablePort({ host = "127.0.0.1" } = {}) {
   const server = createServer();
   server.listen(0, host);
@@ -64,4 +65,33 @@ export function reservedPortArgs(reservation) {
   const preload = new URL("./reuse-port-preload.mjs", import.meta.url);
   preload.searchParams.set("port", String(reservation.port));
   return ["--import", preload.href];
+}
+
+// Holds a port on `host` that refuses connections until release(). A connected client
+// socket stays bound to it, so nothing listens there, while the kernel skips the port
+// for every other bind to port 0 and every outgoing connection's local port. Only an
+// explicit bind to this port number could take it.
+export async function refusingPort({ host = "127.0.0.1" } = {}) {
+  const server = createServer();
+  server.listen(0, host);
+  await once(server, "listening");
+  // An explicit local address makes Node bind the client before it connects.
+  const holder = connect({ port: server.address().port, host, localAddress: host });
+  const [[peer]] = await Promise.all([once(server, "connection"), once(holder, "connect")]);
+  // Stop listening; the held connection keeps the client's port bound.
+  const closed = new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+  let released;
+  return {
+    port: holder.localPort,
+    release() {
+      released ??= (async () => {
+        holder.destroy();
+        peer.destroy();
+        await closed;
+      })();
+      return released;
+    },
+  };
 }
