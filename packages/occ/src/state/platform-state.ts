@@ -368,14 +368,15 @@ export interface CredentialSourceRepository extends CredentialSourceReadReposito
     withdrawal: CredentialWithdrawal,
   ): Promise<Readonly<CredentialWithdrawal>>;
   /**
-   * Makes `request.requestedBy` the requester of a pending withdrawal: the principal whose
-   * `agent:operate` the worker rechecks. A revoked withdrawal never changes.
+   * Makes `requestedBy` the requester of a pending withdrawal: the principal whose
+   * `agent:operate` the worker rechecks. `requestedAt` keeps the first request's time, and a
+   * revoked withdrawal never changes.
    */
   reassignCredentialWithdrawal(
     namespaceId: string,
     revisionId: string,
     credentialSourceId: string,
-    request: { readonly requestedBy: string; readonly requestedAt: string },
+    requestedBy: string,
   ): Promise<Readonly<CredentialWithdrawal> | undefined>;
   /** Records the worker's latest outcome code on a pending withdrawal. */
   recordCredentialWithdrawalAttempt(
@@ -1755,19 +1756,20 @@ function repositories(
       );
       return immutableCopy(saved);
     },
-    reassignCredentialWithdrawal: async (namespaceId, revisionId, credentialSourceId, request) => {
+    reassignCredentialWithdrawal: async (
+      namespaceId,
+      revisionId,
+      credentialSourceId,
+      requestedBy,
+    ) => {
       const current = await findCredentialWithdrawal(namespaceId, revisionId, credentialSourceId);
       if (current === undefined || current.state !== "pending") {
         return undefined;
       }
-      if (!isNonEmptyString(request.requestedBy)) {
+      if (!isNonEmptyString(requestedBy)) {
         throw new ScopeViolationError("A credential withdrawal requester is missing.");
       }
-      const saved = immutableCopy({
-        ...current,
-        requestedBy: request.requestedBy,
-        requestedAt: request.requestedAt,
-      });
+      const saved = immutableCopy({ ...current, requestedBy });
       snapshot.credentialWithdrawals.set(
         withdrawalKey(namespaceId, revisionId, credentialSourceId),
         saved,

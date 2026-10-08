@@ -2120,24 +2120,24 @@ async function verifyCredentialSourceContract(
     );
     assert.equal(deployment.agentTarget, undefined);
   });
-  // A pending withdrawal can be reassigned to the operator whose replay queues its next attempt.
-  const reassignedAt = new Date(Date.now() + 2000).toISOString();
+  // A pending withdrawal can be reassigned to the operator whose replay queues its next attempt;
+  // it keeps the first request's time.
   await store.transact(async (transaction) => {
     assert.deepEqual(
       await transaction.credentialSources.reassignCredentialWithdrawal(
         sourceNamespace.id,
         sourceRevision.id,
         source.id,
-        { requestedBy: "principal-platform-state-replay", requestedAt: reassignedAt },
+        "principal-platform-state-replay",
       ),
-      { ...withdrawal, requestedBy: "principal-platform-state-replay", requestedAt: reassignedAt },
+      { ...withdrawal, requestedBy: "principal-platform-state-replay" },
     );
     assert.deepEqual(
       await transaction.credentialSources.reassignCredentialWithdrawal(
         sourceNamespace.id,
         sourceRevision.id,
         source.id,
-        { requestedBy: withdrawal.requestedBy, requestedAt: withdrawal.requestedAt },
+        withdrawal.requestedBy,
       ),
       withdrawal,
     );
@@ -2192,7 +2192,7 @@ async function verifyCredentialSourceContract(
         sourceNamespace.id,
         sourceRevision.id,
         source.id,
-        { requestedBy: "principal-platform-state-replay", requestedAt: reassignedAt },
+        "principal-platform-state-replay",
       ),
       undefined,
     );

@@ -6033,7 +6033,6 @@ export class OpenClawController {
         );
       }
       const revision = await this.activeCredentialSourceRevision(state, agent, input);
-      const requestedAt = this.timestamp();
       let withdrawal = await state.credentialSources.requestCredentialWithdrawal(
         Object.freeze({
           namespaceId: agent.namespaceId,
@@ -6042,7 +6041,7 @@ export class OpenClawController {
           credentialSourceId: input.credentialSourceId,
           state: "pending",
           requestedBy: principalId,
-          requestedAt,
+          requestedAt: this.timestamp(),
         }),
       );
       if (
@@ -6060,7 +6059,7 @@ export class OpenClawController {
             withdrawal.namespaceId,
             withdrawal.revisionId,
             withdrawal.credentialSourceId,
-            { requestedBy: principalId, requestedAt },
+            principalId,
           );
           if (reassigned === undefined) {
             throw new ResourceStateConflictError(
