@@ -3323,7 +3323,7 @@ revisionTest(
 );
 
 revisionTest(
-  "a withdrawal whose requester lost Agent operate fails once with a denial and no revocation",
+  "a withdrawal whose requester lost Agent operate fails once with a denial, and another operator's replay completes it",
   async (fixture) => {
     const { owner, candidate: active } = await fixture.admitInitialRevision("withdraw-denied", {
       agent: { auth: "credential_source" },
@@ -3351,6 +3351,12 @@ revisionTest(
       credentialSourceId: owner.harnessAuth.sourceId,
     };
     await fixture.controller.withdrawAgentCredentialSource(requester, request);
+    // While that attempt is outstanding, a replay neither queues another nor takes it over.
+    const pendingReplay = await fixture.controller.withdrawAgentCredentialSource(
+      fixture.actor.id,
+      request,
+    );
+    assert.equal(pendingReplay.requestedBy, requester);
     await fixture.observerPool.query(
       `DELETE FROM occ.iam_access_bindings WHERE identity_subject_id = $1`,
       [requester],
@@ -3393,6 +3399,44 @@ revisionTest(
         reason_code: "AUTHORIZATION_DENIED",
       },
     ]);
+
+    // An authorized operator's replay queues the next attempt on its own authority, so the
+    // offboarded requester cannot leave the source usable until a redeploy.
+    await fixture.stop();
+    const replayed = await fixture.controller.withdrawAgentCredentialSource(
+      fixture.actor.id,
+      request,
+    );
+    assert.equal(replayed.state, "pending");
+    assert.equal(replayed.requestedBy, fixture.actor.id);
+    assert.equal(replayed.requestedAt, recorded.requestedAt);
+    assert.equal(replayed.withdrawalInProgress, true);
+    const retry = await fixture.observerPool.query(
+      `SELECT idempotency_key, actor_id FROM occ.controller_work
+       WHERE revision_id = $1 AND agent_target = 'credentials_withdrawn' AND state = 'queued'`,
+      [active.id],
+    );
+    assert.equal(retry.rowCount, 1);
+    assert.equal(retry.rows[0].actor_id, fixture.actor.id);
+    await startWorker();
+    await fixture.work(
+      { id: active.id, idempotencyKey: retry.rows[0].idempotency_key },
+      "succeeded",
+    );
+    assert.deepEqual(withdrawn, [[active.id, owner.harnessAuth.sourceId]]);
+    const revoked = await fixture.controller.readAgentCredentialWithdrawal(
+      fixture.actor.id,
+      request,
+    );
+    assert.equal(revoked.state, "revoked");
+    assert.equal(revoked.requestedBy, fixture.actor.id);
+    const revocations = await fixture.observerPool.query(
+      `SELECT actor_id FROM occ.audit_events
+       WHERE namespace_id = $1 AND action = 'openclaw.agents.lifecycle.credentials_withdraw'
+         AND kind = 'mutation' AND outcome = 'success'`,
+      [fixture.namespace.id],
+    );
+    assert.deepEqual(revocations.rows, [{ actor_id: fixture.actor.id }]);
   },
 );
 
@@ -3783,6 +3827,116 @@ revisionTest(
       0,
       "maintenance stops only after all withdrawals are revoked",
     );
+  },
+);
+
+revisionTest(
+  "maintenance keeps re-queuing withdrawals after a withdrawn source loses its Agent grant",
+  async (fixture) => {
+    const owner = await fixture.agent("withdrawn-grant-revoked", {
+      auth: "credential_source",
+      nonModelSources: 1,
+    });
+    const active = await fixture.revision(owner, 1);
+    const toolSourceId = toolSources(owner)[0].sourceId;
+    const modelSourceId = owner.harnessAuth.sourceId;
+    const dispatched = [];
+    await fixture.start(
+      {
+        ...fixture.compute,
+        maintenanceIntervalMs: 3_600_000,
+        async prepareRevision(revision, revisionContext) {
+          if (revision.id === active.id) {
+            dispatched.push((revisionContext?.credentialSources ?? []).map(({ id }) => id));
+          }
+          return fixture.compute.prepareRevision(revision, revisionContext);
+        },
+        async withdrawCredentialSource(_revision, source) {
+          return { sourceId: source.id, state: "revoked" };
+        },
+      },
+      { convergenceTimeoutMs: 50, transformDrivers: withCredentialGateway },
+    );
+    await fixture.work(active, "succeeded");
+    assert.deepEqual(dispatched, [[toolSourceId]]);
+
+    // A pending withdrawal whose attempts ran out, after which the Agent principal's grant on
+    // the withdrawn source is removed. The source never attaches again either way.
+    const strandWithdrawal = async (credentialSourceId) => {
+      await fixture.state.transact((unit) =>
+        unit.credentialSources.requestCredentialWithdrawal({
+          namespaceId: fixture.namespace.id,
+          agentId: owner.id,
+          revisionId: active.id,
+          credentialSourceId,
+          state: "pending",
+          requestedBy: fixture.actor.id,
+          requestedAt: new Date().toISOString(),
+        }),
+      );
+      const removed = await fixture.observerPool.query(
+        `DELETE FROM occ.iam_access_bindings
+         WHERE identity_subject_id = $1 AND resource_kind = 'credential_source'
+           AND resource_id = $2`,
+        [owner.servicePrincipalId, credentialSourceId],
+      );
+      assert.equal(removed.rowCount, 1);
+    };
+    const runMaintenance = async () => {
+      const due = await fixture.advanceMaintenance(active);
+      assert.equal(due.rowCount, 1, "the maintenance chain must continue");
+      const settled = await waitFor("the maintenance pass to settle", async () => {
+        const rows = await fixture.observerPool.query(
+          `SELECT state, reason_code FROM occ.controller_work WHERE idempotency_key = $1`,
+          [due.rows[0].idempotency_key],
+        );
+        return ["succeeded", "failed_permanent"].includes(rows.rows[0]?.state)
+          ? rows.rows[0]
+          : undefined;
+      });
+      assert.equal(settled.state, "succeeded", `maintenance ended ${settled.reason_code}`);
+    };
+    const withdrawalWork = async () =>
+      (
+        await fixture.observerPool.query(
+          `SELECT idempotency_key FROM occ.controller_work
+           WHERE revision_id = $1 AND agent_target = 'credentials_withdrawn'
+           ORDER BY created_at`,
+          [active.id],
+        )
+      ).rows.map(({ idempotency_key }) => ({ id: active.id, idempotencyKey: idempotency_key }));
+    const withdrawalState = async (credentialSourceId) =>
+      (
+        await fixture.state.read((view) =>
+          view.credentialSources.findCredentialWithdrawal(
+            fixture.namespace.id,
+            active.id,
+            credentialSourceId,
+          ),
+        )
+      ).state;
+
+    // A tool source: maintenance re-queues its withdrawal and repairs the revision without it.
+    await strandWithdrawal(toolSourceId);
+    await runMaintenance();
+    const [toolWithdrawal, ...extra] = await withdrawalWork();
+    assert.ok(toolWithdrawal, "maintenance must queue the pending tool withdrawal again");
+    assert.deepEqual(extra, []);
+    assert.deepEqual(dispatched.at(-1), []);
+    await fixture.work(toolWithdrawal, "succeeded");
+    assert.equal(await withdrawalState(toolSourceId), "revoked");
+
+    // The model source: maintenance re-queues its withdrawal without preparing the revision.
+    await strandWithdrawal(modelSourceId);
+    const prepared = dispatched.length;
+    await runMaintenance();
+    const work = await withdrawalWork();
+    assert.equal(work.length, 2, "maintenance must queue the pending model withdrawal again");
+    const modelWithdrawal = work[1];
+    await fixture.work(modelWithdrawal, "succeeded");
+    assert.equal(await withdrawalState(modelSourceId), "revoked");
+    await runMaintenance();
+    assert.equal(dispatched.length, prepared, "a model-withdrawn revision must not be prepared");
   },
 );
 
