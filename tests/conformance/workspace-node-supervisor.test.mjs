@@ -26,6 +26,23 @@ async function jsonLines(path) {
     .map((line) => JSON.parse(line));
 }
 
+// Polls until `pid` no longer exists (ESRCH), for at most five seconds.
+async function processGone(description, pid) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error.code === "ESRCH") {
+        return;
+      }
+      throw error;
+    }
+    await delay(25);
+  }
+  assert.fail(description);
+}
+
 // Stub lines for a saved-identity probe that appends a "probe" row to the events
 // file in the supervisor's HOME (the test directory) and never answers, keeping
 // the event loop busy as a slow probe does.
@@ -244,11 +261,14 @@ test(
     );
     assert.equal(afterEmptyToken.filter(({ kind }) => kind === "node").length, 3);
 
-    // Stop exits once the children are gone, without waiting for the probe.
+    // Stop exits once the children are gone, without waiting for the probe. The
+    // group kill also ends the Codex grandchild, but the supervisor does not wait for
+    // it: it dies and its new parent reaps it a moment later, and until then
+    // kill(pid, 0) still finds it.
     supervisor.kill("SIGTERM");
     assert.deepEqual(await exited, [0, null], output());
-    for (const { pid } of (await events()).filter(({ pid }) => pid !== undefined)) {
-      assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+    for (const { kind, pid } of (await events()).filter(({ pid }) => pid !== undefined)) {
+      await processGone(`${kind} ${pid} gone after stop`, pid);
     }
   },
 );
