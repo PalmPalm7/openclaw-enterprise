@@ -367,6 +367,17 @@ export interface CredentialSourceRepository extends CredentialSourceReadReposito
   requestCredentialWithdrawal(
     withdrawal: CredentialWithdrawal,
   ): Promise<Readonly<CredentialWithdrawal>>;
+  /**
+   * Makes `requestedBy` the requester of a pending withdrawal: the principal whose
+   * `agent:operate` the worker rechecks. `requestedAt` keeps the first request's time, and a
+   * revoked withdrawal never changes.
+   */
+  reassignCredentialWithdrawal(
+    namespaceId: string,
+    revisionId: string,
+    credentialSourceId: string,
+    requestedBy: string,
+  ): Promise<Readonly<CredentialWithdrawal> | undefined>;
   /** Records the worker's latest outcome code on a pending withdrawal. */
   recordCredentialWithdrawalAttempt(
     namespaceId: string,
@@ -1741,6 +1752,26 @@ function repositories(
       const saved = immutableCopy(withdrawal);
       snapshot.credentialWithdrawals.set(
         withdrawalKey(withdrawal.namespaceId, withdrawal.revisionId, withdrawal.credentialSourceId),
+        saved,
+      );
+      return immutableCopy(saved);
+    },
+    reassignCredentialWithdrawal: async (
+      namespaceId,
+      revisionId,
+      credentialSourceId,
+      requestedBy,
+    ) => {
+      const current = await findCredentialWithdrawal(namespaceId, revisionId, credentialSourceId);
+      if (current === undefined || current.state !== "pending") {
+        return undefined;
+      }
+      if (!isNonEmptyString(requestedBy)) {
+        throw new ScopeViolationError("A credential withdrawal requester is missing.");
+      }
+      const saved = immutableCopy({ ...current, requestedBy });
+      snapshot.credentialWithdrawals.set(
+        withdrawalKey(namespaceId, revisionId, credentialSourceId),
         saved,
       );
       return immutableCopy(saved);

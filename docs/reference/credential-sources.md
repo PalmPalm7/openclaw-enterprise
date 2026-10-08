@@ -163,7 +163,8 @@ The caller needs `agent:operate`, and the active revision must have been
 admitted with that source, as its Harness authentication or in
 `credentialSources`. The request returns `202` with the withdrawal in state `pending`.
 A replay returns the same withdrawal. It queues another attempt only if no
-attempt is already queued or running.
+attempt is already queued or running, and the caller then becomes the
+withdrawal's `requestedBy`.
 
 The worker detaches the source from the revision's Sandbox and records
 `revoked` only after the gateway confirms that the revision's placeholders no
@@ -176,7 +177,8 @@ worker's latest attempt, and `withdrawalInProgress`, which is `true` while an
 attempt is queued or running. A `pending` withdrawal with reason
 `CREDENTIAL_WITHDRAWAL_PENDING` is waiting for the gateway; a Sandbox without a
 running process never confirms revocation. `AUTHORIZATION_DENIED` or
-`ACTOR_REVOKED` means the requester lost `agent:operate`.
+`ACTOR_REVOKED` means the requester lost `agent:operate`; another operator can
+send the withdraw request again to retry it on their own authority.
 
 The worker retries an unconfirmed withdrawal a few times with backoff
 (`OCC_WORKER_MAX_ATTEMPTS`). When those attempts run out, the withdrawal stays
@@ -189,9 +191,10 @@ recreated, a withdrawn source is left out and the revision keeps running
 without it, unless `harnessAuth` names it. A withdrawn Harness source instead fails provisioning with
 `CREDENTIAL_WITHDRAWN`, and maintenance of the revision stops preparing it. While any
 withdrawal is `pending`, each maintenance pass queues another attempt if none is
-outstanding. After model-source withdrawal, maintenance never prepares the revision
-again. It continues recovering pending tool withdrawals even when the model
-source is already `revoked`, and stops only when every withdrawal is `revoked`.
+outstanding. Maintenance does not recheck grants on withdrawn sources, which never
+attach again, so removing one cannot stop it. After model-source withdrawal,
+maintenance never prepares the revision again. It continues recovering pending
+tool withdrawals even when the model source is already `revoked`, and stops only when every withdrawal is `revoked`.
 Redeploy to resume Compute repair.
 
 Withdrawals of different sources on one revision share one worker attempt, but

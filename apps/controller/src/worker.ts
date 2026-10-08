@@ -3156,8 +3156,21 @@ export class ControllerWorker {
     ) {
       return { outcome: "permanent", code: "INVALID_HARNESS_AUTH" };
     }
-    // Both the deploying actor and the Agent principal must still operate every source.
+    // Both the deploying actor and the Agent principal must still operate every source the
+    // revision can attach. A withdrawn source, pending or revoked, never attaches again
+    // (`resolveRevisionSecretContext`), so a grant removed from it must not fail maintenance
+    // before maintenance re-queues the withdrawal itself.
+    const withdrawnSourceIds = new Set(
+      (
+        await this.state.read((view) =>
+          view.credentialSources.listCredentialWithdrawals(revision.namespaceId, revision.id),
+        )
+      ).map(({ credentialSourceId }) => credentialSourceId),
+    );
     for (const sourceId of revisionCredentialSourceIds(revision)) {
+      if (withdrawnSourceIds.has(sourceId)) {
+        continue;
+      }
       for (const principalId of [claim.actorId, revision.servicePrincipalId]) {
         const sourceAuthorization: AuthorizationRequest = {
           principalId,
