@@ -26,7 +26,7 @@ async function execute(command, args, { timeoutMs, ...options } = {}) {
       ...(bounded ? { timeout: timeoutMs, killSignal: "SIGKILL" } : {}),
     });
   } catch (error) {
-    if (bounded && error.killed && error.signal === "SIGKILL") {
+    if (bounded && error.killed && error.signal === "SIGKILL" && error.code == null) {
       error.timedOut = true;
     }
     throw error;
