@@ -92,7 +92,14 @@ named source from the list, fails with `400` "The Harness credential source must
 be listed in the Agent's credentialSources." after the grant checks below.
 
 The caller needs `credential_source:operate` on each exact
-source, including any the update removes. Deployment also requires the Agent's
+source, including any the update removes. Every source a request lists, including
+one it keeps, must be `ready` and registered through the selected Credential
+Gateway. Sources the Agent already binds need only `operate`, so after the
+Installation selects another Credential Gateway, an update that leaves
+`credentialSources` out still succeeds, and one that sets `harnessAuth` to
+another method or source and lists only new sources, or `[]`, removes the old
+ones. Listing an old source again fails with `503`, and so does deploying an
+Agent that still lists one. Deployment also requires the Agent's
 service principal to have `operate` on each source; grant it with a
 [Namespace IAM](authorization.md#manage-namespace-policy) Role and an exact
 `credential_source` AccessBinding. The principal needs no permission on the

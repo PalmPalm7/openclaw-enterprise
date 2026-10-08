@@ -5531,19 +5531,27 @@ export class OpenClawController {
       await this.guardAgentProvisioning(state, namespace.id, agent.id);
       await this.guardProvisioningConfiguration(state, namespace.id, input.configurationId);
       const previousAuth = this.harnessAuthBinding(agent.harnessAuth);
-      await this.authorizeHarnessAuthSource(state, principalId, namespace.id, previousAuth);
+      // Every update needs operate on each credential source the Agent binds now, but not a
+      // ready record on the selected gateway: after a gateway change, an update must still be
+      // able to drop sources the new gateway does not own. Only sources the update binds are
+      // looked up, and deploy admission rechecks every listed source.
+      if (previousAuth?.method === "credential_source") {
+        // Normally also listed; checked on its own in case a stored row predates the rule.
+        await this.authorizeBoundCredentialSources(principalId, namespace.id, [
+          { sourceId: previousAuth.sourceId },
+        ]);
+      } else {
+        await this.authorizeHarnessAuthSource(state, principalId, namespace.id, previousAuth);
+      }
+      await this.authorizeBoundCredentialSources(
+        principalId,
+        namespace.id,
+        agent.credentialSources ?? [],
+      );
       if (requestedAuth !== undefined) {
         rejectCrossNamespaceSecretSources(namespace.id, undefined, requestedAuth);
         await this.authorizeHarnessAuthSource(state, principalId, namespace.id, requestedAuth);
       }
-      // Changing either binding needs operate on the sources it removes and adds.
-      await this.authorizeAgentCredentialSources(
-        state,
-        principalId,
-        namespace.id,
-        agent.credentialSources ?? [],
-        undefined,
-      );
       if (requestedSources !== undefined) {
         await this.authorizeAgentCredentialSources(
           state,
@@ -7134,6 +7142,25 @@ export class OpenClawController {
   private assertCredentialGatewaySelected(): void {
     if (!this.selections.has("credential_gateway")) {
       throw new CredentialGatewayNotConfiguredError();
+    }
+  }
+
+  /**
+   * `operate` on each source an Agent already binds, so an update cannot swap out or drop a
+   * source the caller may not use. It reads no record, so it answers the same whether or not the
+   * source still exists, is ready, or belongs to the selected gateway.
+   */
+  private async authorizeBoundCredentialSources(
+    principalId: string,
+    namespaceId: string,
+    bindings: readonly AgentCredentialSourceBinding[],
+  ): Promise<void> {
+    for (const { sourceId } of bindings) {
+      await this.authorize(principalId, "operate", {
+        kind: "credential_source",
+        namespaceId,
+        id: sourceId,
+      });
     }
   }
 
