@@ -5531,18 +5531,11 @@ export class OpenClawController {
       await this.guardAgentProvisioning(state, namespace.id, agent.id);
       await this.guardProvisioningConfiguration(state, namespace.id, input.configurationId);
       const previousAuth = this.harnessAuthBinding(agent.harnessAuth);
-      // Every update needs operate on each credential source the Agent binds now, but not a
-      // ready record on the selected gateway: after a gateway change, an update must still be
-      // able to drop sources the new gateway does not own. Only sources the update binds are
-      // looked up, and deploy admission rechecks every listed source.
-      if (previousAuth?.method === "credential_source") {
-        // Normally also listed; checked on its own in case a stored row predates the rule.
-        await this.authorizeBoundCredentialSources(principalId, namespace.id, [
-          { sourceId: previousAuth.sourceId },
-        ]);
-      } else {
-        await this.authorizeHarnessAuthSource(state, principalId, namespace.id, previousAuth);
-      }
+      // Every update needs the caller's grant on each source the Agent binds now, but not a
+      // usable record: after a Secret Driver or Credential Gateway change, an update must still
+      // be able to replace or drop what the new driver does not own. Only what the update
+      // binds is looked up, and deploy admission rechecks every bound source.
+      await this.authorizeBoundHarnessAuth(principalId, namespace.id, previousAuth);
       await this.authorizeBoundCredentialSources(
         principalId,
         namespace.id,
@@ -7142,6 +7135,40 @@ export class OpenClawController {
   private assertCredentialGatewaySelected(): void {
     if (!this.selections.has("credential_gateway")) {
       throw new CredentialGatewayNotConfiguredError();
+    }
+  }
+
+  /**
+   * The caller's grant on the Harness source an Agent already binds: Secret or credential
+   * source `operate`, ServiceAccount `read`. Like `authorizeBoundCredentialSources`, it reads no
+   * record, so it answers the same whether or not the source still exists or belongs to the
+   * selected driver. A credential source is normally also listed; it is checked here in case a
+   * stored row predates that rule.
+   */
+  private async authorizeBoundHarnessAuth(
+    principalId: string,
+    namespaceId: string,
+    binding: HarnessAuthBinding | null,
+  ): Promise<void> {
+    if (binding === null || binding.method === "runtime") {
+      return;
+    }
+    if (binding.method === "credential_source") {
+      await this.authorizeBoundCredentialSources(principalId, namespaceId, [
+        { sourceId: binding.sourceId },
+      ]);
+    } else if (isSecretHarnessAuth(binding)) {
+      await this.authorize(principalId, "operate", {
+        kind: "secret",
+        namespaceId,
+        id: binding.source.id,
+      });
+    } else {
+      await this.authorize(principalId, "read", {
+        kind: "service_account",
+        namespaceId,
+        id: binding.source.id,
+      });
     }
   }
 

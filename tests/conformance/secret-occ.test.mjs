@@ -938,3 +938,130 @@ test("a Secret update refuses a Secret that another Secret Driver owns", async (
   assert.deepEqual(replacement.calls, []);
   assert.equal(secretDriver.valueFor(secret), "sk-test-original");
 });
+
+test("after a Secret Driver change an Agent update can replace the old Harness Secret but not keep it", async () => {
+  const { agent, controller, iamState, makeReady, namespace } = await fixture();
+  await makeReady();
+  const update = (principalId, fields = {}) =>
+    controller.updateAgent(principalId, {
+      namespaceId: namespace.id,
+      agentId: agent.id,
+      configurationId: agent.configurationId,
+      ...fields,
+    });
+  const stored = async () =>
+    (await controller.getAgent(administrator, namespace.id, agent.id)).harnessAuth;
+  const oldHarnessAuth = await stored();
+  assert.equal(oldHarnessAuth.method, "api_key");
+
+  // The Installation re-selects its Secret Driver; the old Harness Secret stays stored.
+  const replacement = createTestSecretDriver({ id: "secret-replacement" });
+  controller.registerDriver(replacement);
+  controller.selectDriver("secret", replacement.id);
+
+  // Keeping the old Secret is still refused: deploy could not deliver it.
+  await assert.rejects(
+    update(administrator, { harnessAuth: oldHarnessAuth }),
+    DependencyUnavailableError,
+  );
+  await assert.rejects(
+    controller.deployAgent(
+      administrator,
+      { namespaceId: namespace.id, agentId: agent.id },
+      resolveApprovedDevelopmentHarness,
+    ),
+    DependencyUnavailableError,
+  );
+  assert.deepEqual(await stored(), oldHarnessAuth);
+
+  // Any update still needs operate on the bound Secret, denied before any lookup, including
+  // the lookup of a requested Secret that does not exist.
+  iamState.restrictions.push({
+    id: "deny-operate-old-harness-secret",
+    namespaceId: namespace.id,
+    action: "operate",
+    resourceKind: "secret",
+    resourceId: oldHarnessAuth.source.id,
+    effect: "deny",
+  });
+  const missing = {
+    method: "api_key",
+    source: {
+      kind: "secret",
+      namespaceId: namespace.id,
+      id: "sec_00000000-0000-4000-8000-00000000ffff",
+    },
+  };
+  for (const fields of [{}, { harnessAuth: null }, { harnessAuth: missing }]) {
+    await assert.rejects(update(administrator, fields), (error) => {
+      assert.ok(error instanceof AuthorizationDeniedError);
+      assert.deepEqual(error.authorization.resource, oldHarnessAuth.source);
+      return true;
+    });
+  }
+  iamState.restrictions.length = 0;
+  assert.deepEqual(await stored(), oldHarnessAuth);
+
+  // An update that binds nothing new succeeds, and so does one that clears the old Secret.
+  assert.deepEqual((await update(administrator)).harnessAuth, oldHarnessAuth);
+  assert.equal((await update(administrator, { harnessAuth: null })).harnessAuth, null);
+
+  // A Secret stored through the new driver binds as usual.
+  const current = await controller.createSecret(administrator, {
+    namespaceId: namespace.id,
+    name: "replacement-harness-key",
+    value: "synthetic-replacement-key",
+  });
+  const harnessAuth = { method: "api_key", source: current.ref };
+  assert.deepEqual((await update(administrator, { harnessAuth })).harnessAuth, harnessAuth);
+});
+
+test("an Agent update needs read on its current ServiceAccount, before any lookup", async () => {
+  const { agent, controller, iamState, makeReady, namespace } = await fixture();
+  await makeReady();
+  grantRole(iamState, administrator, {
+    id: "secret-occ-service-account-role",
+    permissions: { service_account: ["create", "read"] },
+  });
+  const account = await controller.createServiceAccount(administrator, {
+    namespaceId: namespace.id,
+    name: "harness-account",
+  });
+  const accountRef = { kind: "service_account", namespaceId: namespace.id, id: account.id };
+  const update = (principalId, fields = {}) =>
+    controller.updateAgent(principalId, {
+      namespaceId: namespace.id,
+      agentId: agent.id,
+      configurationId: agent.configurationId,
+      ...fields,
+    });
+  await update(administrator, { harnessAuth: { method: "codex_pat", source: accountRef } });
+
+  // metadataReader may update the Agent but not read the account it binds.
+  const missing = {
+    method: "api_key",
+    source: {
+      kind: "secret",
+      namespaceId: namespace.id,
+      id: "sec_00000000-0000-4000-8000-00000000ffff",
+    },
+  };
+  for (const fields of [{}, { harnessAuth: null }, { harnessAuth: missing }]) {
+    await assert.rejects(update(metadataReader, fields), (error) => {
+      assert.ok(error instanceof AuthorizationDeniedError);
+      assert.deepEqual(error.authorization, { action: "read", resource: accountRef });
+      return true;
+    });
+  }
+  bindRole(iamState, metadataReader, {
+    id: "secret-occ-metadata-reader-account",
+    roleId: "secret-occ-service-account-role",
+    namespaceId: namespace.id,
+    resource: { kind: "service_account", id: account.id },
+  });
+  assert.deepEqual((await update(metadataReader)).harnessAuth, {
+    method: "codex_pat",
+    source: accountRef,
+  });
+  assert.equal((await update(metadataReader, { harnessAuth: null })).harnessAuth, null);
+});
