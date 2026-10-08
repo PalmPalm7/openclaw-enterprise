@@ -113,9 +113,10 @@ test("Kubernetes preflight rejects an invalid API server version response", asyn
   assert.equal(fixture.namespaceReads(), 0);
 });
 
-test("Kubernetes preflight names the unreachable API server endpoint", async () => {
+test("Kubernetes preflight names the unreachable API server endpoint", async (t) => {
   // A held loopback port refuses connections; a released one could be taken by a parallel test.
   const refusing = await refusingPort();
+  t.after(() => refusing.release());
   const { port } = refusing;
   const directory = await mkdtemp(join(tmpdir(), "occ-kubernetes-preflight-"));
   try {
@@ -182,7 +183,6 @@ test("Kubernetes preflight names the unreachable API server endpoint", async () 
       ],
     );
   } finally {
-    await refusing.release();
     await rm(directory, { recursive: true, force: true });
   }
 });
