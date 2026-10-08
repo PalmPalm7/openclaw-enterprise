@@ -156,9 +156,30 @@ export function createWorkerRevisionFixtures(testFile) {
         backendId = null,
         grantHarnessSecret = true,
         auth = "secret",
+        nonModelSources = 0,
       } = {},
     ) {
       const id = `agt_${randomUUID()}`;
+      // Tool sources are ready gateway-held tokens in the same Namespace as the Agent.
+      const credentialSources = [];
+      for (let index = 0; index < nonModelSources; index += 1) {
+        const source = {
+          id: `cs_${randomUUID()}`,
+          namespaceId: namespace.id,
+          name: `${label}-tool-${index}-${randomUUID()}`,
+          type: "bearer-token",
+          config: { host: `api-${index}.example.com`, env_var: `TOOL_TOKEN_${index}` },
+          secrets: {},
+          driverId: CREDENTIAL_GATEWAY_FIXTURE_ID,
+          state: "registering",
+          createdAt: new Date().toISOString(),
+        };
+        await state.transact(async (unit) => {
+          await unit.credentialSources.createCredentialSource(source);
+          await unit.credentialSources.markCredentialSourceReady(namespace.id, source.id);
+        });
+        credentialSources.push({ sourceId: source.id });
+      }
       const configurationId = `cfg_${randomUUID()}`;
       let harnessAuth;
       if (auth === "runtime") {
@@ -201,8 +222,16 @@ export function createWorkerRevisionFixtures(testFile) {
           source: { kind: "secret", namespaceId: namespace.id, id: identity.id },
         };
       } else {
-        harnessAuth = { method: "chatgpt_service_account", serviceAccountId };
+        harnessAuth = {
+          method: "codex_pat",
+          source: { kind: "service_account", namespaceId: namespace.id, id: serviceAccountId },
+        };
       }
+      // The list holds every bound source: the Harness source first, then the others.
+      const listedSources = [
+        ...(harnessAuth.method === "credential_source" ? [{ sourceId: harnessAuth.sourceId }] : []),
+        ...credentialSources,
+      ];
       const owner = await state.transact(async (unit) => {
         await unit.configurations.createConfiguration({
           id: configurationId,
@@ -218,12 +247,14 @@ export function createWorkerRevisionFixtures(testFile) {
           configurationId,
           backendId,
           harnessAuth,
+          ...(listedSources.length === 0 ? {} : { credentialSources: listedSources }),
           executionMode,
           servicePrincipalId: `service-agent-${id}`,
           createdAt: new Date().toISOString(),
         });
       });
-      if (harnessAuth.method === "credential_source") {
+      const operatedSources = listedSources.map(({ sourceId }) => sourceId);
+      if (operatedSources.length > 0) {
         // Deployment requires the Agent, like the deploying actor, to operate its source.
         const sourceRoleId = `role-${randomUUID()}`;
         await observerPool.query(
@@ -236,21 +267,24 @@ export function createWorkerRevisionFixtures(testFile) {
             JSON.stringify([{ action: "operate", resourceKind: "credential_source" }]),
           ],
         );
-        await observerPool.query(
-          `INSERT INTO occ.iam_access_bindings
+        for (const sourceId of operatedSources) {
+          await observerPool.query(
+            `INSERT INTO occ.iam_access_bindings
             (id, namespace_id, identity_subject_id, group_subject_id, role_id, resource_kind, resource_id)
            VALUES ($1, $2, $3, NULL, $4, 'credential_source', $5)`,
-          [
-            `binding-${randomUUID()}`,
-            namespace.id,
-            owner.servicePrincipalId,
-            sourceRoleId,
-            harnessAuth.sourceId,
-          ],
-        );
+            [
+              `binding-${randomUUID()}`,
+              namespace.id,
+              owner.servicePrincipalId,
+              sourceRoleId,
+              sourceId,
+            ],
+          );
+        }
       }
       if (
         (harnessAuth.method === "api_key" || harnessAuth.method === "codex_pat") &&
+        harnessAuth.source.kind === "secret" &&
         grantHarnessSecret
       ) {
         await observerPool.query(
@@ -288,9 +322,12 @@ export function createWorkerRevisionFixtures(testFile) {
           sourceType: source.type,
           loginMode: "api_key",
         };
-      } else if (owner.harnessAuth.method === "chatgpt_service_account") {
+      } else if (
+        owner.harnessAuth.method === "codex_pat" &&
+        owner.harnessAuth.source.kind === "service_account"
+      ) {
         const account = await state.read((view) =>
-          view.serviceAccounts.findServiceAccount(namespace.id, owner.harnessAuth.serviceAccountId),
+          view.serviceAccounts.findServiceAccount(namespace.id, owner.harnessAuth.source.id),
         );
         const backendBinding = await state.read((view) =>
           view.serviceAccounts.findServiceAccountBackendBinding(namespace.id, account.id),
@@ -298,6 +335,17 @@ export function createWorkerRevisionFixtures(testFile) {
         harnessAuth = { ...owner.harnessAuth, credential: account.credential, backendBinding };
       } else {
         harnessAuth = { ...owner.harnessAuth, secretDriverId: secretDriver.id };
+      }
+      const credentialSources = [];
+      for (const { sourceId } of owner.credentialSources ?? []) {
+        const source = await state.read((view) =>
+          view.credentialSources.findCredentialSource(namespace.id, sourceId),
+        );
+        credentialSources.push({
+          sourceId,
+          credentialGatewayId: source.driverId,
+          sourceType: source.type,
+        });
       }
       const approvedHarness =
         harness ??
@@ -318,6 +366,7 @@ export function createWorkerRevisionFixtures(testFile) {
         compute: { id: compute.id, implementation: compute.implementation },
         ...(plugins === undefined ? {} : { plugins }),
         harnessAuth,
+        ...(credentialSources.length === 0 ? {} : { credentialSources }),
         servicePrincipalId: owner.servicePrincipalId,
         ...(repositoryCredentials === undefined ? {} : { repositoryCredentials }),
         createdAt: new Date().toISOString(),

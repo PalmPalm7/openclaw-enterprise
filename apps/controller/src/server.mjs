@@ -3,10 +3,10 @@ import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { isAbsolute } from "node:path";
 import {
-  PresetFileError,
   loadInstallationConfiguration,
   loadStartupConfigurationSnapshot,
 } from "./composition/installation-config.ts";
+import { PresetFileError } from "./composition/installation-presets.ts";
 import { composeProduction } from "./composition/production.ts";
 import { validateWorkspaceFilesApiKeyPath } from "./composition/workspace-files.ts";
 import { createOccLogger, emitOccLogEvent } from "./logging.ts";

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -12,6 +12,7 @@ import { prepareCodexSeccompProfile } from "../../scripts/ci/codex-seccomp.mjs";
 import { metricsMonitoringImages } from "../../scripts/ci/metrics-monitoring-images.mjs";
 import { nodeLogExcerpt } from "../../scripts/ci/k3d-diagnostics.mjs";
 import { defaultK3sImage } from "../../scripts/ci/prepare.mjs";
+import { withStateLock } from "../../scripts/ci/state-lock.mjs";
 import { createKubernetesInstallationConfiguration } from "../helpers/kubernetes-real.mjs";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
@@ -1791,6 +1792,128 @@ console.error(new URL(template.env.OCC_TEST_DATABASE_URL).pathname.slice(1) + " 
     `docker-exec\tpostgres\tDROP DATABASE IF EXISTS "${copyName}" WITH (FORCE)`,
     `docker-exec\tpostgres\tDROP DATABASE IF EXISTS "${templateName}" WITH (FORCE)`,
   ]);
+});
+
+test("prepareFile and cleanup in two processes keep each other's state entries", async (t) => {
+  const root = await fixture(t);
+  const statePath = join(root, "state.json");
+  const dockerPath = join(root, "fake-docker.mjs");
+  const corepackPath = join(root, "fake-corepack.mjs");
+  const prefix = "openclaw-ci-synthetic";
+  const server = {
+    id: "compose-postgres-synthetic",
+    kind: "compose-postgres",
+    owner: prefix,
+    status: "ready",
+    name: "openclaw_ci_pg_synthetic",
+    composeFile: join(repositoryRoot, "compose.postgres.yaml"),
+    port: 45431,
+  };
+  await writeState(statePath, {
+    version: 1,
+    repositoryRoot,
+    lane: "postgres-application",
+    prefix,
+    statePath,
+    resources: [server],
+  });
+  // Each command takes a little while, so the two processes' state updates overlap.
+  const slow = `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);\n`;
+  await writeFile(dockerPath, `#!${process.execPath}\n${slow}`, { mode: 0o700 });
+  await writeFile(corepackPath, `#!${process.execPath}\n${slow}`, { mode: 0o700 });
+  // Like the worker revision suite: a template per process, then a copy per test.
+  const program = `
+const { prepareFile } = await import(process.argv[1]);
+const options = {
+  lane: "postgres-application",
+  file: "tests/integration/postgres-worker-agent-revision.test.mjs",
+  statePath: process.argv[2],
+};
+const template = await prepareFile(options);
+for (let index = 0; index < 10; index += 1) {
+  const copy = await prepareFile({ ...options, template: template.env.OCC_TEST_DATABASE_URL });
+  await copy.cleanup();
+}
+await template.cleanup();
+`;
+  const run = () =>
+    new Promise((resolveRun) => {
+      const child = spawn(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          program,
+          new URL("../../scripts/ci/prepare.mjs", import.meta.url).href,
+          statePath,
+        ],
+        {
+          cwd: repositoryRoot,
+          env: {
+            PATH: root,
+            LANG: "C",
+            OCC_DOCKER_BIN: dockerPath,
+            OPENCLAW_CI_COREPACK_BIN: corepackPath,
+          },
+          stdio: ["ignore", "ignore", "pipe"],
+          timeout: 60_000,
+        },
+      );
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk;
+      });
+      child.on("close", (code) => resolveRun({ code, stderr }));
+    });
+  const results = await Promise.all([run(), run()]);
+  for (const result of results) {
+    assert.equal(result.code, 0, result.stderr);
+  }
+  const settled = JSON.parse(await readFile(statePath, "utf8"));
+  assert.deepEqual(settled.resources, [server]);
+  assert.deepEqual((await readdir(root)).sort(), [
+    "fake-corepack.mjs",
+    "fake-docker.mjs",
+    "state.json",
+  ]);
+});
+
+test("the CI state lock removes an exited holder's lock and waits for a live one", async (t) => {
+  const root = await fixture(t);
+  const statePath = join(root, "state.json");
+  const lockPath = `${statePath}.lock`;
+  const exited = spawnSync(process.execPath, ["-e", ""]);
+  assert.equal(exited.status, 0);
+  await writeFile(lockPath, `${exited.pid} abandoned\n`, { mode: 0o600 });
+  // A nested call in the same async context reuses the held lock.
+  assert.equal(
+    await withStateLock(statePath, () => withStateLock(statePath, async () => "ran")),
+    "ran",
+  );
+  await assert.rejects(() => stat(lockPath), { code: "ENOENT" });
+
+  const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], {
+    stdio: "ignore",
+  });
+  t.after(() => holder.kill());
+  await writeFile(lockPath, `${holder.pid} live\n`, { mode: 0o600 });
+  let ran = false;
+  await assert.rejects(
+    () =>
+      withStateLock(
+        statePath,
+        async () => {
+          ran = true;
+        },
+        { timeoutMs: 300 },
+      ),
+    new RegExp(
+      `Timed out after 300 ms waiting for the CI state lock .* \\(held by pid ${holder.pid}\\)`,
+    ),
+  );
+  assert.equal(ran, false);
+  assert.equal(await readFile(lockPath, "utf8"), `${holder.pid} live\n`);
+  assert.deepEqual((await readdir(root)).sort(), ["state.json.lock"]);
 });
 
 test("repository platform preparation refuses a public relay gateway before importing images", async (t) => {

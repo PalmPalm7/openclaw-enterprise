@@ -10,7 +10,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "..");
 const profilesDir = resolve(repoRoot, "deploy/profiles");
 const allowedProfiles = new Set(["openclaw", "codex"]);
-const digestImage = /^[^@\s]+@sha256:[a-f0-9]{64}$/i;
+const digestImage = /^[^@\s]+@sha256:[a-f0-9]{64}$/;
 const proxyUrl = /^https?:\/\/(0|[1-9][0-9]{0,2})(\.(0|[1-9][0-9]{0,2})){3}:[1-9][0-9]{0,4}$/;
 const dnsHostname =
   /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
@@ -1417,7 +1417,7 @@ function buildRendered(profile, parsed, diagnostics) {
       );
     } else {
       diagnostics.prerequisites.push(
-        "ChatGPT service-account app connections configured outside OCE before Agents use chatgpt_service_account auth.",
+        "ChatGPT service-account app connections configured outside OCE before Agents select a managed ServiceAccount as their codex_pat source.",
       );
       diagnostics.warnings.push(
         "Managed ChatGPT service-account issuance is wired but remains unverified until a live admin credential flow is qualified.",

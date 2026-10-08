@@ -220,6 +220,11 @@ export interface SecretReference extends ResourceRef {
   readonly namespaceId: string;
 }
 
+export interface ServiceAccountReference extends ResourceRef {
+  readonly kind: "service_account";
+  readonly namespaceId: string;
+}
+
 export interface SecretIdentity {
   readonly id: string;
   readonly namespaceId: string;
@@ -360,11 +365,23 @@ export interface CredentialWithdrawalStatus extends CredentialWithdrawal {
   readonly withdrawalInProgress: boolean;
 }
 
+/** A non-model credential source the Agent's Harness may use at its source's endpoints. */
+export interface AgentCredentialSourceBinding {
+  readonly sourceId: string;
+}
+
+/** Private admission metadata for one non-model source frozen into a revision. */
+export interface CredentialSourceSnapshot {
+  readonly sourceId: string;
+  readonly credentialGatewayId: string;
+  readonly sourceType: string;
+}
+
 export type HarnessAuthBinding =
   | { readonly method: "api_key"; readonly source: SecretReference }
   | { readonly method: "codex_pat"; readonly source: SecretReference }
   | { readonly method: "oauth"; readonly source: SecretReference }
-  | { readonly method: "chatgpt_service_account"; readonly serviceAccountId: string }
+  | { readonly method: "codex_pat"; readonly source: ServiceAccountReference }
   | { readonly method: "credential_source"; readonly sourceId: string }
   | { readonly method: "runtime" };
 
@@ -387,8 +404,8 @@ export type HarnessAuthSnapshot =
       readonly secretDriverId: string;
     }
   | {
-      readonly method: "chatgpt_service_account";
-      readonly serviceAccountId: string;
+      readonly method: "codex_pat";
+      readonly source: ServiceAccountReference;
       readonly credential: ServiceAccountCredential & { readonly kind: "access_token" };
       readonly backendBinding: {
         readonly backendId: string;
@@ -407,17 +424,19 @@ export type HarnessAuthSnapshot =
 
 /** Authoritative delivery references, resolved again at dispatch; never secret values. */
 export type ResolvedHarnessAuth =
-  | (Extract<HarnessAuthSnapshot, { method: "api_key" | "codex_pat" | "oauth" }> & {
+  | (Extract<HarnessAuthSnapshot, { source: SecretReference }> & {
       readonly backendRef: SecretBackendRef;
     })
   | (Extract<HarnessAuthSnapshot, { method: "credential_source" }> & {
       readonly source: Readonly<CredentialSource>;
     })
-  | Extract<HarnessAuthSnapshot, { method: "chatgpt_service_account" | "runtime" }>;
+  | Extract<HarnessAuthSnapshot, { source: ServiceAccountReference } | { method: "runtime" }>;
 
 export interface ComputeRevisionContext {
   readonly workspaceSetup?: Readonly<WorkspaceSetup>;
   readonly harnessAuth: ResolvedHarnessAuth;
+  /** Non-model sources resolved again at dispatch, in admission order. */
+  readonly credentialSources?: readonly Readonly<CredentialSource>[];
   readonly secretEnvironment: readonly SecretEnvironmentProjection[];
   readonly repositoryCredentials?: readonly RepositoryCredentialRuntimeBinding[];
 }
@@ -641,6 +660,7 @@ export interface Agent extends Scope {
   readonly configurationId: string;
   readonly backendId: BackendRef;
   readonly harnessAuth: HarnessAuthBinding | null;
+  readonly credentialSources?: readonly AgentCredentialSourceBinding[];
   readonly executionMode: HarnessExecutionMode;
   readonly plugins?: PluginDesiredState;
   readonly pluginApprovers?: PluginApprovers;
@@ -660,6 +680,7 @@ export interface ConfigurationReadError {
     | "repositoryBindings"
     | "repositoryAccess"
     | "harnessAuth"
+    | "credentialSources"
     | "secretBindings"
     | "repositoryCredentials"
     | "configuration";
@@ -667,7 +688,12 @@ export interface ConfigurationReadError {
 
 export type AgentMetadata = Omit<
   Agent,
-  "plugins" | "pluginApprovers" | "repositoryBindings" | "repositoryAccess" | "harnessAuth"
+  | "plugins"
+  | "pluginApprovers"
+  | "repositoryBindings"
+  | "repositoryAccess"
+  | "harnessAuth"
+  | "credentialSources"
 >;
 
 export type AgentRead =
@@ -724,6 +750,7 @@ export interface AgentRevision extends Scope {
   readonly pluginApprovers?: PluginApprovers;
   readonly repositoryCredentials?: RepositoryRevisionState;
   readonly harnessAuth: HarnessAuthSnapshot;
+  readonly credentialSources?: readonly CredentialSourceSnapshot[];
   readonly servicePrincipalId: string;
   readonly createdAt: string;
 }
@@ -754,6 +781,9 @@ export function freezeAgentRevision(revision: AgentRevision): Readonly<AgentRevi
     harness: Object.freeze({ ...revision.harness }),
     compute: Object.freeze({ ...revision.compute }),
     harnessAuth: immutableCopy(revision.harnessAuth),
+    ...(revision.credentialSources === undefined
+      ? {}
+      : { credentialSources: immutableCopy(revision.credentialSources) }),
   });
 }
 
@@ -1854,7 +1884,12 @@ export * from "./api/common.ts";
 export * from "./api/resources.ts";
 export * from "./api/routes.ts";
 
-export { normalizeHarnessAuthBinding, harnessAuthBindingFromSnapshot } from "./harness-auth.ts";
+export {
+  normalizeHarnessAuthBinding,
+  harnessAuthBindingFromSnapshot,
+  isSecretHarnessAuth,
+  isServiceAccountHarnessAuth,
+} from "./harness-auth.ts";
 
 export type { Preset, PresetTemplate, PresetLaunchSettings, PresetVariable } from "./presets.ts";
 export { normalizePresetTemplate } from "./presets.ts";

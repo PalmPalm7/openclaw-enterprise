@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import { resolveApprovedHarness } from "../../apps/controller/src/composition/production-harness.ts";
+import { KubernetesComputeDriver } from "../../apps/controller/src/drivers/compute/kubernetes/index.ts";
 import { createTestSecretDriver } from "../helpers/secret-driver.mjs";
 import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs";
+import { conformanceKubernetesOptions } from "../helpers/kubernetes-compute.mjs";
 import { authenticatedHeaders, signInWithEmailPassword } from "../helpers/auth-session.mjs";
 import {
   alternateWorkspaceId,
@@ -82,13 +84,10 @@ async function assertNoAgentNamed(pool, namespaceId, name, label) {
   assert.equal(result.rows[0].count, 0, label);
 }
 
-async function expectBackendConflict(operation, pattern) {
+async function expectBackendConflict(operation, pattern, name = "ResourceConflictError") {
   await assert.rejects(
     operation,
-    (error) =>
-      // A Harness authentication refusal at deploy names itself after authorization.
-      (error?.name === "ResourceConflictError" || error?.name === "ResourceStateConflictError") &&
-      (pattern === undefined || pattern.test(error.message)),
+    (error) => error?.name === name && (pattern === undefined || pattern.test(error.message)),
   );
 }
 
@@ -220,7 +219,7 @@ test(
   { ...requiresPostgres, timeout: 60_000 },
   async (context) => {
     const fixture = await createBackendFixture(context);
-    const controller = createBackendController(fixture);
+    const controller = createBackendController(fixture, { nativeWorkerSupport: "custom-image" });
 
     const draftNamespace = await createReadyNamespace(fixture, "drafts");
     const draftConfiguration = await createConfiguration(fixture, controller, draftNamespace);
@@ -280,7 +279,10 @@ test(
       name: `dedicated-${randomUUID()}`,
       configurationId: dedicatedConfiguration.id,
       backendId,
-      harnessAuth: { method: "chatgpt_service_account", serviceAccountId: account.id },
+      harnessAuth: {
+        method: "codex_pat",
+        source: { kind: "service_account", namespaceId: account.namespaceId, id: account.id },
+      },
       executionMode: "dedicated",
     });
     const admitted = await controller.deployAgent(
@@ -290,8 +292,8 @@ test(
     );
     assert.equal(admitted.backendId, backendId);
     assert.deepEqual(admitted.harnessAuth, {
-      method: "chatgpt_service_account",
-      serviceAccountId: account.id,
+      method: "codex_pat",
+      source: { kind: "service_account", namespaceId: account.namespaceId, id: account.id },
       credential: account.credential,
       backendBinding: binding,
     });
@@ -326,7 +328,10 @@ test(
       name: `embedded-${randomUUID()}`,
       configurationId: embeddedConfiguration.id,
       backendId,
-      harnessAuth: { method: "chatgpt_service_account", serviceAccountId: account.id },
+      harnessAuth: {
+        method: "codex_pat",
+        source: { kind: "service_account", namespaceId: account.namespaceId, id: account.id },
+      },
       executionMode: "embedded",
     });
     await expectBackendConflict(
@@ -337,6 +342,7 @@ test(
           resolveApprovedHarness,
         ),
       /configured model and topology/,
+      "ResourceStateConflictError",
     );
     await assertNoRevision(
       fixture.pool,
@@ -423,6 +429,58 @@ test(
       { action: "retire", revisionId: admitted.id, backendId },
     ]);
 
+    // A supported native-worker Sandbox lets both PAT sources reach the real
+    // Kubernetes topology validator; neither may become an OpenClaw deployment.
+    const sandbox = {
+      id: "sandbox-native-pat-admission",
+      implementation: "test/native-worker",
+      capability: "sandbox",
+      facets: ["networking", "filesystem", "process"],
+      async provisionHarness() {
+        assert.fail("Refused admission must not provision a Sandbox.");
+      },
+      async cleanup() {},
+    };
+    const kubernetes = new KubernetesComputeDriver(
+      conformanceKubernetesOptions({ gatewayTrustedProxyCidrs: ["127.0.0.1/32"] }),
+      { sandboxDriver: sandbox },
+    );
+    controller.selectedDriver("compute").validateHarnessAuth =
+      kubernetes.validateHarnessAuth.bind(kubernetes);
+    controller.registerDriver(sandbox);
+    controller.selectDriver("sandbox", sandbox.id);
+    const admissionCounts = async () =>
+      (
+        await fixture.pool.query(
+          `SELECT
+             (SELECT count(*)::integer FROM occ.agent_revisions WHERE namespace_id=$1 AND agent_id=$2) AS revisions,
+             (SELECT count(*)::integer FROM occ.controller_work WHERE namespace_id=$1) AS work`,
+          [exactNamespace.id, dedicated.id],
+        )
+      ).rows;
+    const beforeNativeAttempts = await admissionCounts();
+    for (const source of [dedicated.harnessAuth.source, replacementAuth.source]) {
+      await controller.updateAgent(fixture.actor.id, {
+        namespaceId: exactNamespace.id,
+        agentId: dedicated.id,
+        configurationId: embeddedConfiguration.id,
+        backendId: source.kind === "service_account" ? backendId : null,
+        harnessAuth: { method: "codex_pat", source },
+        executionMode: "dedicated",
+      });
+      await expectBackendConflict(
+        () =>
+          controller.deployAgent(
+            fixture.actor.id,
+            { namespaceId: exactNamespace.id, agentId: dedicated.id },
+            resolveApprovedHarness,
+          ),
+        /configured model and topology/,
+        "ResourceStateConflictError",
+      );
+      assert.deepEqual(await admissionCounts(), beforeNativeAttempts, source.kind);
+    }
+
     const deletedAccount = await fixture.state.transact((unit) =>
       unit.serviceAccounts.deleteServiceAccount(exactNamespace.id, account.id),
     );
@@ -486,7 +544,14 @@ test(
         name: `${scenario.label}-${randomUUID()}`,
         configurationId: configuration.id,
         backendId: scenario.agentBackendId,
-        harnessAuth: { method: "chatgpt_service_account", serviceAccountId: brokenAccount.id },
+        harnessAuth: {
+          method: "codex_pat",
+          source: {
+            kind: "service_account",
+            namespaceId: brokenAccount.namespaceId,
+            id: brokenAccount.id,
+          },
+        },
         executionMode: "dedicated",
       });
       await expectBackendConflict(
@@ -529,7 +594,14 @@ test(
           name: crossNamespaceAgentName,
           configurationId: targetConfiguration.id,
           backendId,
-          harnessAuth: { method: "chatgpt_service_account", serviceAccountId: sourceAccount.id },
+          harnessAuth: {
+            method: "codex_pat",
+            source: {
+              kind: "service_account",
+              namespaceId: targetNamespace.id,
+              id: sourceAccount.id,
+            },
+          },
           executionMode: "dedicated",
         }),
       (error) =>
@@ -543,5 +615,116 @@ test(
       "cross-Namespace account ownership must be rejected before an Agent is persisted",
     );
     await fixture.cleanup(targetNamespace, sourceNamespace);
+  },
+);
+
+test(
+  "PostgreSQL Agent provisioning admits a managed PAT source only with an issued access token matching its Backend",
+  { ...requiresPostgres, timeout: 60_000 },
+  async (context) => {
+    const fixture = await createBackendFixture(context);
+    const controller = createBackendController(fixture, { nativeWorkerSupport: "custom-image" });
+    // These stubs only pass the provisioning capability gates; Harness authentication admission
+    // (the code under test) stays real. No worker runs, so no runtime or Configuration effect may.
+    Object.assign(controller.selectedDriver("compute"), {
+      agentProvisioning: { executionModes: ["dedicated"] },
+      requiresAgentRuntimeCredentials: true,
+      validateAgentProvisioning() {},
+      async provisionAgentRuntimeCredentials() {
+        assert.fail("Provisioning admission must not provision runtime credentials.");
+      },
+      async getAgentRuntimeCredentialStatus() {
+        return { transportConfigured: false };
+      },
+    });
+    Object.assign(controller.selectedDriver("configuration"), {
+      async createExact() {
+        assert.fail("Provisioning admission must not create a Configuration.");
+      },
+      async inspectExact() {
+        assert.fail("Provisioning admission must not inspect a Configuration.");
+      },
+    });
+    const provision = (namespace, account, label) =>
+      controller.provisionAgent(fixture.actor.id, {
+        namespaceId: namespace.id,
+        requestId: `req_${randomUUID()}`,
+        name: `${label}-${randomUUID().slice(0, 8)}`,
+        executionMode: "dedicated",
+        backendId,
+        configuration: { kind: "agent", values: createHarnessConfiguration("codex", "gpt-4.1") },
+        harnessAuth: {
+          method: "codex_pat",
+          source: { kind: "service_account", namespaceId: account.namespaceId, id: account.id },
+        },
+      });
+    const pendingWork = async (namespace) =>
+      (
+        await fixture.pool.query(
+          "SELECT count(*)::int AS count FROM occ.agent_provisioning_work WHERE namespace_id = $1",
+          [namespace.id],
+        )
+      ).rows[0].count;
+
+    // The exact issued account with a matching Backend binding is admitted as a PAT snapshot.
+    const exactNamespace = await createReadyNamespace(fixture, "provisioning-exact");
+    const account = await createAccessTokenServiceAccount(
+      fixture.state,
+      exactNamespace.id,
+      "provisioning-exact",
+    );
+    await seedBackendBinding(fixture.pool, account);
+    const accepted = await provision(exactNamespace, account, "provisioning-exact");
+    assert.equal(accepted.provisioning.status, "queued", JSON.stringify(accepted));
+    assert.equal(await pendingWork(exactNamespace), 1);
+    await fixture.cleanup(exactNamespace);
+
+    for (const scenario of [
+      {
+        label: "api-key-credential",
+        credential: { kind: "api_key", secretRef: { name: "provider-api-key", key: "api-key" } },
+        binding: {},
+        message: /requires an issued account access-token credential/,
+        expectedErrorName: "ResourceStateConflictError",
+      },
+      {
+        label: "workspace-mismatch",
+        binding: { workspaceId: alternateWorkspaceId },
+        message: /does not match its Backend/,
+      },
+      {
+        label: "credential-not-issued",
+        binding: { credentialIssued: false },
+        message: /does not match its Backend/,
+      },
+    ]) {
+      const namespace = await createReadyNamespace(fixture, scenario.label);
+      const brokenAccount = await createAccessTokenServiceAccount(
+        fixture.state,
+        namespace.id,
+        scenario.label,
+      );
+      if (scenario.credential !== undefined) {
+        await fixture.state.transact((unit) =>
+          unit.serviceAccounts.updateCredential(
+            namespace.id,
+            brokenAccount.id,
+            scenario.credential,
+          ),
+        );
+      }
+      await seedBackendBinding(fixture.pool, brokenAccount, scenario.binding);
+      await expectBackendConflict(
+        () => provision(namespace, brokenAccount, scenario.label),
+        scenario.message,
+        scenario.expectedErrorName,
+      );
+      assert.equal(
+        await pendingWork(namespace),
+        0,
+        `${scenario.label} must roll back its provisioning record`,
+      );
+      await fixture.cleanup(namespace);
+    }
   },
 );

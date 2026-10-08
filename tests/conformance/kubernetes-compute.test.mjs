@@ -62,17 +62,18 @@ const apiKeyAuth = {
 
 function authContext(revision, namespace = kubernetesNamespaceName(tenant.id)) {
   return {
-    harnessAuth: ["api_key", "codex_pat", "oauth"].includes(revision.harnessAuth.method)
-      ? {
-          ...revision.harnessAuth,
-          backendRef: {
-            namespaceName: namespace,
-            name: "occ-model-key",
-            key: "value",
-            uid: "model-secret-uid",
-          },
-        }
-      : revision.harnessAuth,
+    harnessAuth:
+      revision.harnessAuth.source?.kind === "secret"
+        ? {
+            ...revision.harnessAuth,
+            backendRef: {
+              namespaceName: namespace,
+              name: "occ-model-key",
+              key: "value",
+              uid: "model-secret-uid",
+            },
+          }
+        : revision.harnessAuth,
   };
 }
 
@@ -3225,7 +3226,7 @@ test("gateway routing derives stable endpoints and exact Envoy HTTPRoutes", asyn
     service,
     "node",
   );
-  assert.equal(nodeRoute.spec.rules.length, 4);
+  assert.equal(nodeRoute.spec.rules.length, 5);
   assert.deepEqual(nodeRoute.spec.rules[0].matches, [
     { path: { type: "Exact", value: `/namespaces/${tenant.id}/agents/${revision.agentId}/node` } },
   ]);
@@ -3266,8 +3267,35 @@ test("gateway routing derives stable endpoints and exact Envoy HTTPRoutes", asyn
     ],
     backendRefs: [{ group: "", kind: "Service", name, port: 8080 }],
   });
+  const hookRoute = nodeRoute.spec.rules[2];
+  assert.deepEqual(hookRoute.matches, [
+    {
+      method: "POST",
+      path: {
+        type: "PathPrefix",
+        value: `/namespaces/${tenant.id}/agents/${revision.agentId}/node/__openclaw__/native-hook/`,
+      },
+    },
+  ]);
+  assert.deepEqual(hookRoute.filters[0], {
+    type: "URLRewrite",
+    urlRewrite: {
+      path: { type: "ReplacePrefixMatch", replacePrefixMatch: "/__openclaw__/native-hook/" },
+    },
+  });
+  const hookHeaders = hookRoute.filters[1].requestHeaderModifier;
+  assert.equal(hookHeaders.remove.includes("authorization"), false);
+  for (const header of [
+    "cookie",
+    "x-occ-identity",
+    "x-api-key",
+    "x-openclaw-scopes",
+    "tailscale-user-login",
+  ]) {
+    assert.ok(hookHeaders.remove.includes(header), `hook route must strip ${header}`);
+  }
   for (const [rule, transferPath] of nodeRoute.spec.rules
-    .slice(2)
+    .slice(3)
     .map((rule, index) => [rule, ["worker-bundle/v1", "worker-transfer/v1"][index]])) {
     assert.deepEqual(rule.matches, [
       {
@@ -4297,10 +4325,9 @@ test("account-owned Kubernetes Secrets reject invalid or foreign credentials bef
     .slice(0, 32)}`;
 
   for (const invalid of [
-    { namespaceId: "", serviceAccountId, accessToken: "token", workspaceId: "ws_1" },
-    { namespaceId: tenant.id, serviceAccountId: "", accessToken: "token", workspaceId: "ws_1" },
-    { namespaceId: tenant.id, serviceAccountId, accessToken: "", workspaceId: "ws_1" },
-    { namespaceId: tenant.id, serviceAccountId, accessToken: "token", workspaceId: "" },
+    { namespaceId: "", serviceAccountId, accessToken: "token" },
+    { namespaceId: tenant.id, serviceAccountId: "", accessToken: "token" },
+    { namespaceId: tenant.id, serviceAccountId, accessToken: "" },
   ]) {
     // Incomplete account credentials cannot trigger Kubernetes requests or Secret mutations.
     await assert.rejects(driver.storeServiceAccountCredential(invalid), /must be explicitly/i);
@@ -4322,7 +4349,7 @@ test("account-owned Kubernetes Secrets reject invalid or foreign credentials bef
   }
 });
 
-test("dedicated Codex projects the account-owned token and workspace without exposing either to its gateway", () => {
+test("dedicated Codex projects the account-owned token through the common PAT login", () => {
   const driver = createKubernetesComputeDriver(
     options({
       runtime: {
@@ -4339,8 +4366,8 @@ test("dedicated Codex projects the account-owned token and workspace without exp
     .digest("hex")
     .slice(0, 32)}`;
   const account = {
-    method: "chatgpt_service_account",
-    serviceAccountId,
+    method: "codex_pat",
+    source: { kind: "service_account", namespaceId: tenant.id, id: serviceAccountId },
     backendBinding: {
       backendId: "provider-chatgpt",
       driverId: "chatgpt",
@@ -4369,16 +4396,13 @@ test("dedicated Codex projects the account-owned token and workspace without exp
     workload.spec.template.spec.containers[0].env.map((entry) => [entry.name, entry]),
   );
 
-  // Both values come from the one immutable account-owned reference; no Agent copy is created.
+  // Account tokens use the same native PAT login; workspace ownership stays in the control plane.
   assert.deepEqual(agentEnvironment.CODEX_ACCESS_TOKEN.valueFrom.secretKeyRef, {
     name: secretName,
     key: "token",
   });
-  assert.deepEqual(agentEnvironment.CODEX_CHATGPT_WORKSPACE_ID.valueFrom.secretKeyRef, {
-    name: secretName,
-    key: "workspace-id",
-  });
-  assert.equal(agentEnvironment.CODEX_LOGIN_MODE.value, "chatgpt_service_account");
+  assert.equal(agentEnvironment.CODEX_CHATGPT_WORKSPACE_ID, undefined);
+  assert.equal(agentEnvironment.CODEX_LOGIN_MODE.value, "codex_pat");
   assert.equal(agentEnvironment.OPENAI_API_KEY, undefined);
   assert.equal(agentEnvironment.SLACK_APP_TOKEN, undefined);
   assert.equal(agentEnvironment.SLACK_BOT_TOKEN, undefined);
@@ -4417,6 +4441,86 @@ test("dedicated Codex projects the account-owned token and workspace without exp
   assert.equal(gatewayEnvironment.has("SLACK_APP_TOKEN"), false);
   assert.equal(gatewayEnvironment.has("SLACK_BOT_TOKEN"), false);
   assert.equal(gatewayEnvironment.has("MSTEAMS_APP_PASSWORD"), false);
+});
+
+test("managed PAT preparation projects the account-owned token and rejects a changed owner", async () => {
+  const { driver, revision, namespace, context, objects, records } = workspaceSetupFixture(false);
+  const serviceAccountId = "sa_00000000-0000-4000-8000-000000000001";
+  const secretRef = await driver.storeServiceAccountCredential({
+    namespaceId: tenant.id,
+    serviceAccountId,
+    accessToken: "at-managed-fixture",
+  });
+  revision.harnessAuth = {
+    method: "codex_pat",
+    source: { kind: "service_account", namespaceId: tenant.id, id: serviceAccountId },
+    credential: { kind: "access_token", secretRef },
+    backendBinding: {
+      backendId: "provider-chatgpt",
+      driverId: "chatgpt",
+      workspaceId: "ws_1",
+      credentialIssued: true,
+    },
+  };
+  context.harnessAuth = revision.harnessAuth;
+  await driver.prepareRevision(revision, context);
+  const source = objects.get(`Secret:${namespace}:${secretRef.name}`);
+  const material = [...objects.values()].find(
+    ({ kind, metadata }) => kind === "Secret" && metadata.name.startsWith("harness-secrets-"),
+  );
+  assert.equal(material.data.CODEX_ACCESS_TOKEN, source.data.token);
+  assert.deepEqual(Object.keys(material.data).sort(), ["CODEX_ACCESS_TOKEN", "app-server-token"]);
+
+  // Delivery uses exactly the admitted account snapshot, from the revision's own Namespace.
+  const otherAccountId = "sa_00000000-0000-4000-8000-000000000002";
+  for (const harnessAuth of [
+    {
+      ...revision.harnessAuth,
+      credential: {
+        kind: "access_token",
+        secretRef: {
+          name: `service-account-${createHash("sha256").update(otherAccountId).digest("hex").slice(0, 32)}`,
+          key: "token",
+        },
+      },
+    },
+    { ...revision.harnessAuth, source: { ...revision.harnessAuth.source, id: otherAccountId } },
+    {
+      ...revision.harnessAuth,
+      backendBinding: { ...revision.harnessAuth.backendBinding, workspaceId: "ws_2" },
+    },
+  ]) {
+    await assert.rejects(
+      driver.prepareRevision(revision, { ...context, harnessAuth }),
+      /does not match the admitted account/,
+    );
+  }
+  const foreignAuth = {
+    ...revision.harnessAuth,
+    source: {
+      ...revision.harnessAuth.source,
+      namespaceId: "ns_00000000-0000-4000-8000-0000000000ff",
+    },
+  };
+  await assert.rejects(
+    driver.prepareRevision(
+      { ...revision, harnessAuth: foreignAuth },
+      { ...context, harnessAuth: foreignAuth },
+    ),
+    /does not match the admitted account/,
+  );
+
+  // Sharing the PAT login mode must retain the managed source's account ownership fence.
+  source.metadata.annotations["openclaw.dev/service-account-id"] = "another-account";
+  const before = records.length;
+  await assert.rejects(
+    driver.prepareRevision(revision, context),
+    /Refusing unowned Kubernetes Secret/,
+  );
+  assert.equal(
+    records.slice(before).some(({ kind }) => kind === "Deployment"),
+    false,
+  );
 });
 
 test("direct service account token is confined to the model container and exact admitted Secret", () => {
@@ -4893,6 +4997,57 @@ test("credential-source authentication renders no model Secret and requires the 
       ),
     /incompatible.*topology/i,
   );
+});
+
+test("non-model credential sources resolved at dispatch must match the revision's snapshots", () => {
+  const sandboxDriver = {
+    id: "sandbox-openshell",
+    capability: "sandbox",
+    facets: ["networking", "filesystem", "process"],
+    provisionHarness() {},
+  };
+  const credentialGatewayDriver = { id: "credential-gateway", capability: "credential_gateway" };
+  const driver = new KubernetesComputeDriver(options(), { sandboxDriver, credentialGatewayDriver });
+  const source = (id) => ({
+    id,
+    namespaceId: tenant.id,
+    name: `token-${id.slice(-4)}`,
+    type: "bearer-token",
+    config: {},
+    secrets: {},
+    driverId: credentialGatewayDriver.id,
+    state: "ready",
+    createdAt: "2026-09-26T00:00:00.000Z",
+  });
+  const first = source("cs_00000000-0000-4000-8000-000000000851");
+  const second = source("cs_00000000-0000-4000-8000-000000000852");
+  const revision = {
+    namespaceId: tenant.id,
+    credentialSources: [first, second].map(({ id }) => ({
+      sourceId: id,
+      credentialGatewayId: credentialGatewayDriver.id,
+      sourceType: "bearer-token",
+    })),
+  };
+  // The worker omits withdrawn sources, so a shorter list is valid.
+  assert.deepEqual(driver.credentialSourcesForRevision(revision, { credentialSources: [second] }), [
+    second,
+  ]);
+  assert.deepEqual(driver.credentialSourcesForRevision(revision, undefined), []);
+  for (const [resolved, why] of [
+    [[source("cs_00000000-0000-4000-8000-000000000853")], "a source the revision never admitted"],
+    [[first, first], "the same source twice"],
+    [[{ ...first, namespaceId: "ns_00000000-0000-4000-8000-0000000000ff" }], "another Namespace"],
+    [[{ ...first, driverId: "other-gateway" }], "another gateway"],
+    [[{ ...first, type: "openai" }], "another type"],
+    [[{ ...first, state: "deleting" }], "a deleting source"],
+  ]) {
+    assert.throws(
+      () => driver.credentialSourcesForRevision(revision, { credentialSources: resolved }),
+      /credential source does not match the admitted source/i,
+      why,
+    );
+  }
 });
 
 test("dedicated OpenClaw gateway receives Agent plugin approvers without plugin selections", () => {
@@ -8777,8 +8932,8 @@ test("revision lifecycle rejects another driver or missing identity before clust
   );
   const serviceAccountId = "sa_00000000-0000-4000-8000-000000000001";
   const serviceAccount = {
-    method: "chatgpt_service_account",
-    serviceAccountId,
+    method: "codex_pat",
+    source: { kind: "service_account", namespaceId: tenant.id, id: serviceAccountId },
     backendBinding: {
       backendId: "provider-chatgpt",
       driverId: "chatgpt",
@@ -11761,6 +11916,29 @@ process.exitCode = 3;`;
   },
 );
 
+test("dedicated Codex refuses a caller-selected hook callback before provisioning", async () => {
+  const fixture = workspaceSetupFixture(false);
+  fixture.revision.configuration.plugins = {
+    entries: {
+      codex: {
+        config: {
+          appServer: {
+            nativeHookRelay: {
+              url: "https://other-agent.example.test/hooks",
+              credentialDirectory: "/tmp/hooks",
+            },
+          },
+        },
+      },
+    },
+  };
+  await assert.rejects(
+    fixture.driver.prepareRevision(fixture.revision, fixture.context),
+    /owned by the Compute Driver/,
+  );
+  assert.equal(fixture.records.length, 0);
+});
+
 test("Kubernetes workspace setup rejects foreign identities and unsupported storage before delivery", async () => {
   for (const mutate of [
     ...[
@@ -12090,6 +12268,20 @@ for (const method of ["api_key", "codex_pat"]) {
     const harness = values.find(
       ({ kind, metadata }) => kind === "Deployment" && metadata.name.startsWith("agent-"),
     );
+    const configurationName = gateway.spec.template.spec.volumes.find(
+      ({ name }) => name === "openclaw-configuration",
+    ).configMap.name;
+    const configuration = values.find(
+      ({ kind, metadata }) => kind === "ConfigMap" && metadata.name === configurationName,
+    );
+    const callback = JSON.parse(configuration.data["openclaw.json"]).plugins.entries.codex.config
+      .appServer.nativeHookRelay;
+    assert.deepEqual(callback, {
+      url:
+        driver.getGatewayEndpoint(revision).replace(/^wss:/, "https:") +
+        "/node/__openclaw__/native-hook",
+      credentialDirectory: "/home/node/.oce-native-hooks",
+    });
     assert.equal(gateway.metadata.namespace, gatewayNamespace);
     assert.equal(harness.metadata.namespace, namespace);
     assert.equal(gateway.spec.template.spec.automountServiceAccountToken, false);

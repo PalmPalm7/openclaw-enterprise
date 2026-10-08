@@ -97,6 +97,21 @@ export class DependencyUnavailableError extends AuthorizationDeniedError {
 }
 
 /**
+ * A Configuration Secret binding the selected Secret Driver cannot serve, typically a Secret
+ * stored through a driver the Installation no longer selects. Raised only after the caller's
+ * `operate` grant and the Secret lookup, so it reveals nothing a 403 or 404 hides. Only a
+ * Configuration write can replace the binding, so the fixed message says so.
+ */
+export class SecretBindingDriverError extends DependencyUnavailableError {
+  constructor() {
+    super(
+      "The selected Secret Driver is unavailable or does not own a Secret the Configuration binds. Bind only Secrets stored through the selected driver: update the Configuration's secretBindings, or assign the Agent another Configuration.",
+    );
+    this.name = "SecretBindingDriverError";
+  }
+}
+
+/**
  * A running Agent has no active revision yet (its first deployment, or a redeploy after a
  * stop, is still activating). A lifecycle state, not an outage; it stays a
  * DependencyUnavailableError so callers that need a revision still answer 503.
@@ -185,6 +200,19 @@ export class ConfigurationHarnessError extends ScopeViolationError {
   constructor(message: string) {
     super(message);
     this.name = "ConfigurationHarnessError";
+  }
+}
+
+/**
+ * An Agent's `harnessAuth` names a credential source its `credentialSources` list does not
+ * hold. OCC raises it only after every source authorization, and the rule depends only on
+ * the request and the Agent the caller may already update, so HTTP reports it as an invalid
+ * request instead of hiding it as a scope miss.
+ */
+export class AgentCredentialSourceBindingError extends ScopeViolationError {
+  constructor() {
+    super("The Harness credential source must be listed in the Agent's credentialSources.");
+    this.name = "AgentCredentialSourceBindingError";
   }
 }
 

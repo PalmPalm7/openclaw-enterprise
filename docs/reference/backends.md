@@ -215,7 +215,7 @@ Driver, workspace, and recorded issuance. A mismatch returns
 The worker repeats ownership checks after IAM reauthorization and before
 Compute effects. It reads only binding metadata, never external IDs or admin
 credentials. Mismatches prevent candidate activation; database read failures
-use normal retries. The account-owned token/workspace Secret is delivered only
+use normal retries. The account-owned token Secret is delivered only
 to its compatible dedicated Codex workload.
 
 The ChatGPT client cancels unused HTTP error bodies and responses declared

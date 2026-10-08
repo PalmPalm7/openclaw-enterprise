@@ -12,6 +12,7 @@ import {
 import { PresetValidationError } from "../../packages/contracts/src/index.ts";
 import { normalizeRequestSecretBindings } from "../../packages/occ/src/agent-provisioning.ts";
 import {
+  AgentCredentialSourceBindingError,
   AgentDeletingError,
   AgentPrincipalAuthorizationError,
   AuthorizationDeniedError,
@@ -39,6 +40,7 @@ import {
   RuntimeCredentialsForbiddenByClusterError,
   RuntimeLogsError,
   ScopeViolationError,
+  SecretBindingDriverError,
   SecretBindingValidationError,
   SecretValueError,
 } from "../../packages/occ/src/index.ts";
@@ -221,6 +223,15 @@ const cases = [
       status: 400,
       code: "INVALID_REQUEST",
       message: "The Configuration does not select a supported Harness.",
+    },
+  ],
+  [
+    "an unlisted Harness credential source",
+    new AgentCredentialSourceBindingError(),
+    {
+      status: 400,
+      code: "INVALID_REQUEST",
+      message: "The Harness credential source must be listed in the Agent's credentialSources.",
     },
   ],
   [
@@ -684,6 +695,16 @@ const cases = [
       status: 503,
       code: "DEPENDENCY_UNAVAILABLE",
       message: "A required platform dependency is unavailable.",
+    },
+  ],
+  [
+    "a Configuration Secret binding the selected Secret Driver cannot serve names the fix",
+    new SecretBindingDriverError(),
+    {
+      status: 503,
+      code: "DEPENDENCY_UNAVAILABLE",
+      message:
+        "The selected Secret Driver is unavailable or does not own a Secret the Configuration binds. Bind only Secrets stored through the selected driver: update the Configuration's secretBindings, or assign the Agent another Configuration.",
     },
   ],
   [

@@ -14,6 +14,7 @@ import {
 } from "./device-authorization.ts";
 import type {
   Agent,
+  AgentCredentialSourceBinding,
   AgentRead,
   AgentRevisionRead,
   InitialWorkspaceFiles,
@@ -33,6 +34,7 @@ import type {
   CredentialGatewayDriver,
   CredentialSource,
   CredentialSourceMetadata,
+  CredentialSourceSnapshot,
   CredentialSourceStatus,
   CredentialWithdrawalStatus,
   CredentialSourceType,
@@ -114,6 +116,9 @@ import {
   PresetValidationError,
   normalizeSecretBindings,
   normalizeHarnessAuthBinding,
+  isSecretHarnessAuth,
+  isServiceAccountHarnessAuth,
+  type ServiceAccountReference,
   freezeAgentRevision,
 } from "@openclaw-enterprise/contracts";
 import {
@@ -130,6 +135,7 @@ import {
 } from "./driver-contract.ts";
 import {
   AGENT_NAME_CONFLICT,
+  AgentCredentialSourceBindingError,
   AgentDeletingError,
   AgentPrincipalAuthorizationError,
   AuthorizationDeniedError,
@@ -161,6 +167,7 @@ import {
   RuntimeLogsForbiddenByClusterError,
   RuntimeLogsSandboxNotFoundError,
   ScopeViolationError,
+  SecretBindingDriverError,
   SecretBindingValidationError,
   SecretReferencedError,
   SecretValueError,
@@ -247,6 +254,7 @@ export type { RemovedAccessBinding } from "./iam-policy-cleanup.ts";
 export {
   ActivationFailedError,
   ActivationPendingError,
+  AgentCredentialSourceBindingError,
   AgentDeletingError,
   AgentPrincipalAuthorizationError,
   AuthorizationDeniedError,
@@ -282,6 +290,7 @@ export {
   RuntimeLogsSandboxNotFoundError,
   SandboxRevisionUnsupportedError,
   ScopeViolationError,
+  SecretBindingDriverError,
   SecretBindingValidationError,
   SecretValueError,
   TransientDependencyError,
@@ -555,6 +564,7 @@ export interface CreateAgentInput {
   readonly configurationId: string;
   readonly backendId?: string | null;
   readonly harnessAuth?: HarnessAuthBinding | null;
+  readonly credentialSources?: readonly AgentCredentialSourceBinding[];
   readonly executionMode?: HarnessExecutionMode;
   readonly plugins?: PluginDesiredState;
   readonly pluginApprovers?: PluginApprovers;
@@ -568,6 +578,8 @@ export interface UpdateAgentInput {
   readonly configurationId: string;
   readonly backendId?: string | null;
   readonly harnessAuth?: HarnessAuthBinding | null;
+  /** Replaces the Agent's non-model sources; an empty list removes them. */
+  readonly credentialSources?: readonly AgentCredentialSourceBinding[];
   readonly executionMode?: HarnessExecutionMode;
   readonly plugins?: PluginDesiredState;
   readonly pluginApprovers?: PluginApprovers | null;
@@ -730,6 +742,7 @@ type DriverFor<Capability extends DriverCapability> = DriverByCapability[Capabil
 
 /** Bounds each synchronous Credential Gateway call made while serving an API request. */
 const CREDENTIAL_GATEWAY_TIMEOUT_MS = 30_000;
+const MAX_AGENT_CREDENTIAL_SOURCES = 8;
 /** Overall deadline for one runtime status or log request, Driver calls included. */
 const RUNTIME_LOG_REQUEST_TIMEOUT_MS = 10_000;
 /**
@@ -1083,7 +1096,7 @@ function rejectCrossNamespaceSecretSources(
   harnessAuth: HarnessAuthBinding | null | undefined,
 ): void {
   const sources = Object.values(secretBindings ?? {}).map(({ source }) => source);
-  if (harnessAuth !== undefined && harnessAuth !== null && "source" in harnessAuth) {
+  if (isSecretHarnessAuth(harnessAuth)) {
     sources.push(harnessAuth.source);
   }
   if (sources.some((source) => source.namespaceId !== namespaceId)) {
@@ -3784,9 +3797,7 @@ export class OpenClawController {
       });
       const locked = await this.lockNamespace(state, input.namespaceId);
       // An Installation property, so it is reported before any Namespace state.
-      if (!this.selections.has("credential_gateway")) {
-        throw new CredentialGatewayNotConfiguredError();
-      }
+      this.assertCredentialGatewaySelected();
       if (locked.status !== "ready") {
         throw new NamespaceNotReadyError();
       }
@@ -5344,7 +5355,11 @@ export class OpenClawController {
         return undefined;
       }
       const binding = this.harnessAuthBinding(agent.harnessAuth);
-      if (agent.executionMode !== "dedicated" || binding?.method !== "codex_pat") {
+      if (
+        agent.executionMode !== "dedicated" ||
+        binding?.method !== "codex_pat" ||
+        !isSecretHarnessAuth(binding)
+      ) {
         throw new NotImplementedError(
           "agent_plugins.saved_discovery",
           "Stored plugin discovery requires a dedicated Agent with a Service Accounts Secret.",
@@ -5379,6 +5394,7 @@ export class OpenClawController {
       throw new ScopeViolationError("The initial workspace setup input is invalid.");
     }
     const harnessAuth = this.harnessAuthBinding(input.harnessAuth ?? null);
+    const credentialSources = this.agentCredentialSources(input.credentialSources);
     const executionMode = input.executionMode ?? "embedded";
     if (!validExecutionMode(executionMode)) {
       throw new ScopeViolationError("The Agent Harness execution mode is invalid.");
@@ -5416,6 +5432,13 @@ export class OpenClawController {
       await this.guardProvisioningConfiguration(state, namespace.id, input.configurationId);
       rejectCrossNamespaceSecretSources(namespace.id, undefined, harnessAuth);
       await this.authorizeHarnessAuthSource(state, principalId, namespace.id, harnessAuth);
+      await this.authorizeAgentCredentialSources(
+        state,
+        principalId,
+        namespace.id,
+        credentialSources ?? [],
+        harnessAuth,
+      );
       this.validatePluginPolicies(plugins, pluginApprovers);
       const agentId = this.nextIdentifier("agent");
       await this.authorizeBindings(
@@ -5433,6 +5456,9 @@ export class OpenClawController {
         configurationId: input.configurationId,
         backendId,
         harnessAuth,
+        ...(credentialSources === undefined || credentialSources.length === 0
+          ? {}
+          : { credentialSources }),
         executionMode,
         ...(plugins === undefined ? {} : { plugins }),
         ...(pluginApprovers === undefined ? {} : { pluginApprovers }),
@@ -5466,6 +5492,7 @@ export class OpenClawController {
     }
     const requestedAuth =
       input.harnessAuth === undefined ? undefined : this.harnessAuthBinding(input.harnessAuth);
+    const requestedSources = this.agentCredentialSources(input.credentialSources);
     if (input.executionMode !== undefined && !validExecutionMode(input.executionMode)) {
       throw new ScopeViolationError("The Agent Harness execution mode is invalid.");
     }
@@ -5506,11 +5533,35 @@ export class OpenClawController {
       await this.guardAgentProvisioning(state, namespace.id, agent.id);
       await this.guardProvisioningConfiguration(state, namespace.id, input.configurationId);
       const previousAuth = this.harnessAuthBinding(agent.harnessAuth);
-      await this.authorizeHarnessAuthSource(state, principalId, namespace.id, previousAuth);
+      // Every update needs the caller's grant on each source the Agent binds now, but not a
+      // usable record: after a Secret Driver or Credential Gateway change, an update must still
+      // be able to replace or drop what the new driver does not own. Only what the update
+      // binds is looked up, and deploy admission rechecks every bound source.
+      await this.authorizeBoundHarnessAuth(principalId, namespace.id, previousAuth);
+      await this.authorizeBoundCredentialSources(
+        principalId,
+        namespace.id,
+        agent.credentialSources ?? [],
+      );
       if (requestedAuth !== undefined) {
         rejectCrossNamespaceSecretSources(namespace.id, undefined, requestedAuth);
         await this.authorizeHarnessAuthSource(state, principalId, namespace.id, requestedAuth);
       }
+      if (requestedSources !== undefined) {
+        await this.authorizeAgentCredentialSources(
+          state,
+          principalId,
+          namespace.id,
+          requestedSources,
+          requestedAuth === undefined ? previousAuth : requestedAuth,
+        );
+      } else if (requestedAuth !== undefined) {
+        this.assertHarnessSourceListed(agent.credentialSources ?? [], requestedAuth);
+      }
+      // Unlike the Agent's own bindings above, the named Configuration's Secret bindings get the
+      // full check even when `configurationId` is unchanged: deploy needs them usable, and only a
+      // Configuration write (or naming another Configuration) can replace them, so loosening this
+      // would not unblock the Agent. SecretBindingDriverError names that fix.
       const secretBindings = this.bindings(configuration.secretBindings);
       await this.authorizeBindings(state, principalId, namespace.id, secretBindings);
       const backendId = this.backendId(input.backendId, agent.backendId);
@@ -5537,6 +5588,7 @@ export class OpenClawController {
         repositoryBindings,
         pluginApprovers,
         repositoryAccess,
+        requestedSources,
       );
       if (!updated) {
         throw new ResourceStateConflictError("The Agent Configuration changed during its update.");
@@ -5757,6 +5809,12 @@ export class OpenClawController {
       requireDedicatedNativeSupport(revisionHarness, sandbox, this.nativeWorkers);
       const harnessAuth = await this.admitHarnessAuth(state, principalId, lockedAgent);
       const credentialSourceType = await this.admittedCredentialSourceType(harnessAuth, sandbox);
+      const credentialSources = await this.admitCredentialSources(
+        state,
+        principalId,
+        lockedAgent,
+        sandbox,
+      );
       const secretBindings = this.bindings(metadata.secretBindings);
       const sources = await this.authorizeBindings(
         state,
@@ -5925,6 +5983,7 @@ export class OpenClawController {
             : { pluginApprovers: lockedAgent.pluginApprovers }),
           ...(repositoryCredentials === undefined ? {} : { repositoryCredentials }),
           harnessAuth,
+          ...(credentialSources.length === 0 ? {} : { credentialSources }),
           servicePrincipalId: lockedAgent.servicePrincipalId,
           createdAt,
         }),
@@ -5956,7 +6015,8 @@ export class OpenClawController {
   /**
    * Records a withdrawal of `credentialSourceId` from the Agent's active revision and queues
    * worker work to revoke it. A replay of a pending withdrawal queues another attempt only when
-   * no earlier attempt is still queued or running; a revoked withdrawal is returned unchanged.
+   * no earlier attempt is still queued or running, and that attempt runs on the replaying
+   * operator's authority; a revoked withdrawal is returned unchanged.
    */
   async withdrawAgentCredentialSource(
     principalId: string,
@@ -5980,7 +6040,7 @@ export class OpenClawController {
         );
       }
       const revision = await this.activeCredentialSourceRevision(state, agent, input);
-      const withdrawal = await state.credentialSources.requestCredentialWithdrawal(
+      let withdrawal = await state.credentialSources.requestCredentialWithdrawal(
         Object.freeze({
           namespaceId: agent.namespaceId,
           agentId: agent.id,
@@ -5998,6 +6058,23 @@ export class OpenClawController {
           revision.id,
         ))
       ) {
+        // The worker rechecks `agent:operate` for the recorded requester. An earlier requester
+        // may have lost it since, so the attempt this replay queues runs on the authority just
+        // checked above; otherwise nobody could ever complete the withdrawal.
+        if (withdrawal.requestedBy !== principalId) {
+          const reassigned = await state.credentialSources.reassignCredentialWithdrawal(
+            withdrawal.namespaceId,
+            withdrawal.revisionId,
+            withdrawal.credentialSourceId,
+            principalId,
+          );
+          if (reassigned === undefined) {
+            throw new ResourceStateConflictError(
+              "The credential withdrawal changed during the request.",
+            );
+          }
+          withdrawal = reassigned;
+        }
         await this.record(state, {
           kind: "agent_revision",
           action: "reconcile",
@@ -6056,7 +6133,7 @@ export class OpenClawController {
     });
   }
 
-  /** The active revision must hold the source as its frozen Harness authentication. */
+  /** The active revision must hold the source as its Harness authentication or a non-model source. */
   private async activeCredentialSourceRevision(
     state: PlatformUnitOfWork,
     agent: Readonly<Agent>,
@@ -6072,11 +6149,13 @@ export class OpenClawController {
       agent.id,
       agent.activeRevisionId,
     );
-    if (
-      revision === undefined ||
-      revision.harnessAuth.method !== "credential_source" ||
-      revision.harnessAuth.sourceId !== input.credentialSourceId
-    ) {
+    const harnessSource =
+      revision?.harnessAuth.method === "credential_source" &&
+      revision.harnessAuth.sourceId === input.credentialSourceId;
+    const nonModelSource = (revision?.credentialSources ?? []).some(
+      ({ sourceId }) => sourceId === input.credentialSourceId,
+    );
+    if (revision === undefined || (!harnessSource && !nonModelSource)) {
       throw new ScopeViolationError(
         "The Agent's active revision does not use this credential source.",
       );
@@ -6780,17 +6859,15 @@ export class OpenClawController {
       ...Object.values(plan.configuration.secretBindings ?? {}).map(
         (binding): [AuthorizationRequest["action"], ResourceRef] => ["operate", binding.source],
       ),
-      ...(harnessAuth?.method === "api_key" ||
-      harnessAuth?.method === "codex_pat" ||
-      harnessAuth?.method === "oauth"
+      ...(isSecretHarnessAuth(harnessAuth)
         ? [["operate", harnessAuth.source] as [AuthorizationRequest["action"], ResourceRef]]
         : []),
-      ...(harnessAuth?.method === "chatgpt_service_account"
+      ...(isServiceAccountHarnessAuth(harnessAuth)
         ? [
-            [
-              "read",
-              { kind: "service_account", namespaceId, id: harnessAuth.serviceAccountId },
-            ] as [AuthorizationRequest["action"], ResourceRef],
+            ["read", { kind: "service_account", namespaceId, id: harnessAuth.source.id }] as [
+              AuthorizationRequest["action"],
+              ResourceRef,
+            ],
           ]
         : []),
     ];
@@ -6969,7 +7046,11 @@ export class OpenClawController {
       if (!secret) {
         throw new ScopeViolationError("The Secret does not belong to the exact Namespace.");
       }
-      this.secretDriver(secret.driverId);
+      try {
+        this.secretDriver(secret.driverId);
+      } catch {
+        throw new SecretBindingDriverError();
+      }
       secrets.set(secret.id, secret);
     }
     return Object.freeze([...secrets.values()]);
@@ -6993,11 +7074,7 @@ export class OpenClawController {
     if (binding === null || binding.method === "runtime") {
       return;
     }
-    if (
-      binding.method === "api_key" ||
-      binding.method === "codex_pat" ||
-      binding.method === "oauth"
-    ) {
+    if (isSecretHarnessAuth(binding)) {
       if (binding.source.namespaceId !== namespaceId) {
         throw new ScopeViolationError("Harness authentication sources cannot cross Namespaces.");
       }
@@ -7013,6 +7090,7 @@ export class OpenClawController {
         namespaceId,
         id: binding.sourceId,
       });
+      this.assertCredentialGatewaySelected();
       const source = await state.credentialSources.lockCredentialSource(
         namespaceId,
         binding.sourceId,
@@ -7024,13 +7102,198 @@ export class OpenClawController {
       }
       this.credentialGatewayDriver(source.driverId);
     } else {
+      if (binding.source.namespaceId !== namespaceId) {
+        throw new ScopeViolationError("Harness authentication sources cannot cross Namespaces.");
+      }
       await this.authorize(principalId, "read", {
         kind: "service_account",
         namespaceId,
-        id: binding.serviceAccountId,
+        id: binding.source.id,
       });
-      await this.exactServiceAccount(state, namespaceId, binding.serviceAccountId);
+      await this.exactServiceAccount(state, namespaceId, binding.source.id);
     }
+  }
+
+  private agentCredentialSources(
+    value: unknown,
+  ): readonly AgentCredentialSourceBinding[] | undefined {
+    if (value === undefined) {
+      return undefined;
+    }
+    const seen = new Set<string>();
+    if (!Array.isArray(value) || value.length > MAX_AGENT_CREDENTIAL_SOURCES) {
+      throw new ScopeViolationError("The Agent credential sources are invalid.");
+    }
+    return Object.freeze(
+      value.map((entry: unknown) => {
+        if (
+          typeof entry !== "object" ||
+          entry === null ||
+          Object.keys(entry).length !== 1 ||
+          !isNonEmptyString((entry as { sourceId?: unknown }).sourceId) ||
+          seen.has((entry as { sourceId: string }).sourceId)
+        ) {
+          throw new ScopeViolationError("The Agent credential sources are invalid.");
+        }
+        const sourceId = (entry as { sourceId: string }).sourceId;
+        seen.add(sourceId);
+        return Object.freeze({ sourceId });
+      }),
+    );
+  }
+
+  /** `credentialSources` lists every source; `harnessAuth` names the one the Harness uses. */
+  private assertHarnessSourceListed(
+    bindings: readonly AgentCredentialSourceBinding[],
+    harnessAuth: HarnessAuthBinding | null | undefined,
+  ): void {
+    if (
+      harnessAuth?.method === "credential_source" &&
+      !bindings.some(({ sourceId }) => sourceId === harnessAuth.sourceId)
+    ) {
+      throw new AgentCredentialSourceBindingError();
+    }
+  }
+
+  /**
+   * An Installation property, so it is reported before any source lookup: whether a source
+   * exists never changes the answer. Callers run it after the caller's `operate` check on the
+   * exact source, so a caller without that grant still gets 403 first.
+   */
+  private assertCredentialGatewaySelected(): void {
+    if (!this.selections.has("credential_gateway")) {
+      throw new CredentialGatewayNotConfiguredError();
+    }
+  }
+
+  /**
+   * The caller's grant on the Harness source an Agent already binds: Secret or credential
+   * source `operate`, ServiceAccount `read`. Like `authorizeBoundCredentialSources`, it reads no
+   * record, so it answers the same whether or not the source still exists or belongs to the
+   * selected driver. A credential source is normally also listed; it is checked here in case a
+   * stored row predates that rule.
+   */
+  private async authorizeBoundHarnessAuth(
+    principalId: string,
+    namespaceId: string,
+    binding: HarnessAuthBinding | null,
+  ): Promise<void> {
+    if (binding === null || binding.method === "runtime") {
+      return;
+    }
+    if (binding.method === "credential_source") {
+      await this.authorizeBoundCredentialSources(principalId, namespaceId, [
+        { sourceId: binding.sourceId },
+      ]);
+    } else if (isSecretHarnessAuth(binding)) {
+      await this.authorize(principalId, "operate", {
+        kind: "secret",
+        namespaceId,
+        id: binding.source.id,
+      });
+    } else {
+      await this.authorize(principalId, "read", {
+        kind: "service_account",
+        namespaceId,
+        id: binding.source.id,
+      });
+    }
+  }
+
+  /**
+   * `operate` on each source an Agent already binds, so an update cannot swap out or drop a
+   * source the caller may not use. It reads no record, so it answers the same whether or not the
+   * source still exists, is ready, or belongs to the selected gateway.
+   */
+  private async authorizeBoundCredentialSources(
+    principalId: string,
+    namespaceId: string,
+    bindings: readonly AgentCredentialSourceBinding[],
+  ): Promise<void> {
+    for (const { sourceId } of bindings) {
+      await this.authorize(principalId, "operate", {
+        kind: "credential_source",
+        namespaceId,
+        id: sourceId,
+      });
+    }
+  }
+
+  /**
+   * Namespace lock serializes binding, source deletion, and admission. The listing rule is
+   * checked after every source authorization and lookup, so it never answers before a 403.
+   */
+  private async authorizeAgentCredentialSources(
+    state: PlatformUnitOfWork,
+    principalId: string,
+    namespaceId: string,
+    bindings: readonly AgentCredentialSourceBinding[],
+    harnessAuth: HarnessAuthBinding | null | undefined,
+  ): Promise<void> {
+    for (const { sourceId } of bindings) {
+      await this.authorize(principalId, "operate", {
+        kind: "credential_source",
+        namespaceId,
+        id: sourceId,
+      });
+      this.assertCredentialGatewaySelected();
+      const source = await state.credentialSources.lockCredentialSource(namespaceId, sourceId);
+      if (source === undefined || source.state !== "ready") {
+        throw new ScopeViolationError(
+          "The credential source is unavailable in the exact Namespace.",
+        );
+      }
+      this.credentialGatewayDriver(source.driverId);
+    }
+    this.assertHarnessSourceListed(bindings, harnessAuth);
+  }
+
+  /**
+   * Freezes every source the Agent lists, including the one `harnessAuth` names. Each needs the
+   * Agent principal's `operate` and a ready record; any catalog type may be listed.
+   */
+  private async admitCredentialSources(
+    state: PlatformUnitOfWork,
+    principalId: string,
+    agent: Readonly<Agent>,
+    sandbox: SandboxDriver | undefined,
+  ): Promise<readonly CredentialSourceSnapshot[]> {
+    const bindings = agent.credentialSources ?? [];
+    if (bindings.length === 0) {
+      return [];
+    }
+    // A state refusal, so HTTP keeps the message instead of the generic "already exists".
+    if (sandbox === undefined) {
+      throw new ResourceStateConflictError(
+        "Agent credential sources require a selected Sandbox Driver.",
+      );
+    }
+    await this.authorizeAgentCredentialSources(
+      state,
+      principalId,
+      agent.namespaceId,
+      bindings,
+      agent.harnessAuth,
+    );
+    const snapshots: CredentialSourceSnapshot[] = [];
+    for (const { sourceId } of bindings) {
+      await this.authorizeAgentPrincipal(agent.servicePrincipalId, "operate", {
+        kind: "credential_source",
+        namespaceId: agent.namespaceId,
+        id: sourceId,
+      });
+      const source = await state.credentialSources.lockCredentialSource(
+        agent.namespaceId,
+        sourceId,
+      );
+      if (source === undefined || source.state !== "ready") {
+        throw new ScopeViolationError("The credential source is unavailable.");
+      }
+      const gateway = this.credentialGatewayDriver(source.driverId);
+      await this.credentialSourceType(gateway, source.type);
+      snapshots.push({ sourceId, credentialGatewayId: gateway.id, sourceType: source.type });
+    }
+    return immutableCopy(snapshots);
   }
 
   /**
@@ -7139,16 +7402,12 @@ export class OpenClawController {
     if (record.agentId !== undefined && agent === undefined) {
       throw new ScopeViolationError("The provisioning Agent is unavailable.");
     }
-    const secretDriver =
-      binding.method === "api_key" || binding.method === "codex_pat" || binding.method === "oauth"
-        ? this.secretDriver()
-        : undefined;
-    const auth: HarnessAuthSnapshot =
-      binding.method === "api_key" || binding.method === "codex_pat" || binding.method === "oauth"
-        ? { ...binding, secretDriverId: secretDriver!.id }
-        : agent === undefined
-          ? await this.serviceAccountHarnessAuthSnapshot(state, namespaceId, backendId, binding)
-          : await this.admitHarnessAuth(state, principalId, { ...agent, harnessAuth: binding });
+    const secretDriver = isSecretHarnessAuth(binding) ? this.secretDriver() : undefined;
+    const auth: HarnessAuthSnapshot = isSecretHarnessAuth(binding)
+      ? { ...binding, secretDriverId: secretDriver!.id }
+      : agent === undefined
+        ? await this.serviceAccountHarnessAuthSnapshot(state, namespaceId, backendId, binding)
+        : await this.admitHarnessAuth(state, principalId, { ...agent, harnessAuth: binding });
     const harness = {
       id: resolveConfiguredHarnessId(plan.configuration.values),
       version: "provisioning",
@@ -7693,7 +7952,7 @@ export class OpenClawController {
       (binding) => binding.source.id,
     );
     const auth = plan.harnessAuth;
-    if (auth?.method === "api_key" || auth?.method === "codex_pat" || auth?.method === "oauth") {
+    if (isSecretHarnessAuth(auth)) {
       ids.push(auth.source.id);
     }
     for (const id of ids) {
@@ -7704,12 +7963,11 @@ export class OpenClawController {
       }
     }
     if (
-      auth?.method === "chatgpt_service_account" &&
-      (await state.serviceAccounts.findServiceAccount(namespaceId, auth.serviceAccountId)) ===
-        undefined
+      isServiceAccountHarnessAuth(auth) &&
+      (await state.serviceAccounts.findServiceAccount(namespaceId, auth.source.id)) === undefined
     ) {
       throw new ResourceStateConflictError(
-        `ServiceAccount ${auth.serviceAccountId}, which this provisioning request uses, was deleted. Submit a new Agent provisioning request.`,
+        `ServiceAccount ${auth.source.id}, which this provisioning request uses, was deleted. Submit a new Agent provisioning request.`,
       );
     }
   }
@@ -7753,11 +8011,7 @@ export class OpenClawController {
     for (const binding of Object.values(input.secretBindings ?? {})) {
       ids.add(binding.source.id);
     }
-    if (
-      input.harnessAuth?.method === "api_key" ||
-      input.harnessAuth?.method === "codex_pat" ||
-      input.harnessAuth?.method === "oauth"
-    ) {
+    if (isSecretHarnessAuth(input.harnessAuth)) {
       ids.add(input.harnessAuth.source.id);
     }
     const secrets: Secret[] = [];
@@ -7852,24 +8106,23 @@ export class OpenClawController {
     for (const binding of Object.values(bindings ?? {})) {
       await this.authorizeProvisioningSecretSource(state, principalId, namespaceId, binding.source);
     }
-    if (
-      harnessAuth?.method === "api_key" ||
-      harnessAuth?.method === "codex_pat" ||
-      harnessAuth?.method === "oauth"
-    ) {
+    if (isSecretHarnessAuth(harnessAuth)) {
       await this.authorizeProvisioningSecretSource(
         state,
         principalId,
         namespaceId,
         harnessAuth.source,
       );
-    } else if (harnessAuth?.method === "chatgpt_service_account") {
+    } else if (isServiceAccountHarnessAuth(harnessAuth)) {
+      if (harnessAuth.source.namespaceId !== namespaceId) {
+        throw new ScopeViolationError("Harness authentication sources cannot cross Namespaces.");
+      }
       await this.authorize(principalId, "read", {
         kind: "service_account",
         namespaceId,
-        id: harnessAuth.serviceAccountId,
+        id: harnessAuth.source.id,
       });
-      await this.exactServiceAccount(state, namespaceId, harnessAuth.serviceAccountId);
+      await this.exactServiceAccount(state, namespaceId, harnessAuth.source.id);
     }
   }
 
@@ -7894,12 +8147,9 @@ export class OpenClawController {
     state: PlatformUnitOfWork,
     namespaceId: string,
     backendId: BackendRef,
-    binding: Extract<HarnessAuthBinding, { readonly method: "chatgpt_service_account" }>,
+    binding: Extract<HarnessAuthBinding, { readonly source: ServiceAccountReference }>,
   ): Promise<HarnessAuthSnapshot> {
-    const account = await state.serviceAccounts.lockServiceAccount(
-      namespaceId,
-      binding.serviceAccountId,
-    );
+    const account = await state.serviceAccounts.lockServiceAccount(namespaceId, binding.source.id);
     if (account?.credential?.kind !== "access_token") {
       throw new ResourceStateConflictError(
         "ChatGPT Harness authentication requires an issued account access-token credential.",
@@ -7907,7 +8157,7 @@ export class OpenClawController {
     }
     const backendBinding = await state.serviceAccounts.findServiceAccountBackendBinding(
       namespaceId,
-      binding.serviceAccountId,
+      binding.source.id,
     );
     validateServiceAccountBackendBinding(this.backendMap, backendId, backendBinding);
     const driverId = this.serviceAccountDriverId();
@@ -7938,11 +8188,7 @@ export class OpenClawController {
     if (binding.method === "runtime") {
       return immutableCopy(binding);
     }
-    if (
-      binding.method === "api_key" ||
-      binding.method === "codex_pat" ||
-      binding.method === "oauth"
-    ) {
+    if (isSecretHarnessAuth(binding)) {
       await this.authorizeAgentPrincipal(agent.servicePrincipalId, "operate", binding.source);
       const source = await state.secrets.lockSecret(agent.namespaceId, binding.source.id);
       if (source === undefined) {
@@ -7991,7 +8237,7 @@ export class OpenClawController {
     }
     const account = await state.serviceAccounts.lockServiceAccount(
       agent.namespaceId,
-      binding.serviceAccountId,
+      binding.source.id,
     );
     if (account?.credential?.kind !== "access_token") {
       throw new ResourceStateConflictError(
@@ -8000,7 +8246,7 @@ export class OpenClawController {
     }
     const backendBinding = await state.serviceAccounts.findServiceAccountBackendBinding(
       agent.namespaceId,
-      binding.serviceAccountId,
+      binding.source.id,
     );
     validateServiceAccountBackendBinding(this.backendMap, agent.backendId, backendBinding);
     const driverId = this.serviceAccountDriverId();

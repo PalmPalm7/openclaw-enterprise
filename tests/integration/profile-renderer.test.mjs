@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -258,6 +258,41 @@ const harnessResources = {
   requests: { cpu: "100m", memory: "768Mi" },
   limits: { cpu: "4", memory: "6Gi" },
 };
+
+test("preflight rejects noncanonical SHA-256 image digests", (t) => {
+  for (const profile of ["openclaw", "codex"]) {
+    const input = profile === "codex" ? codexInput() : baseInput();
+    input.repository = repositoryConfiguration();
+    const directory = mkdtempSync(join(tmpdir(), "oce-profile-digest-"));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    for (const [section, key] of [
+      ["controlPlane", "controllerImage"],
+      ["runtime", "image"],
+      ["repository", "image"],
+    ]) {
+      const image = input[section][key];
+      for (const invalid of [
+        image.replace(/(?<=:)[a-f0-9]{64}$/, (digest) => digest.toUpperCase()),
+        image.replace("@sha256:", "@SHA256:"),
+      ]) {
+        // A failed rerender must revoke the previously successful artifacts.
+        assert.equal(render(profile, input, directory).preflight.ok, true);
+        const changed = structuredClone(input);
+        changed[section][key] = invalid;
+        const error = renderError(() => render(profile, changed, directory));
+        assert.match(
+          error.profileRendererOutput,
+          /immutable image reference with a SHA-256 digest/,
+        );
+        const preflight = JSON.parse(readFileSync(join(directory, "preflight.json"), "utf8"));
+        assert.equal(preflight.ok, false);
+        assert.match(preflight.errors.join("\n"), new RegExp(`${section}\\.${key}`));
+        assert.equal(existsSync(join(directory, "values.yaml")), false);
+        assert.equal(existsSync(join(directory, "installation.yaml")), false);
+      }
+    }
+  }
+});
 
 test("profiles give tenant runtimes four-core CPU limits over unchanged 100m requests", () => {
   const example = loadYaml(
