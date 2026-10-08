@@ -84,17 +84,20 @@ export async function refusingPort({ host = "127.0.0.1" } = {}) {
   const holder = connect({ port: server.address().port, host, localAddress: host });
   try {
     await once(holder, "connect");
+    // A reset of the held pair must not crash the test file.
+    holder.on("error", () => {});
     // Closing the listener before it accepts the held connection would reset it.
     while (![...peers].some((socket) => socket.remotePort === holder.localPort)) {
       await once(server, "connection");
     }
   } catch (error) {
     holder.destroy();
+    for (const socket of peers) {
+      socket.destroy();
+    }
     server.close();
     throw error;
   }
-  // A reset of the held pair must not crash the test file.
-  holder.on("error", () => {});
   // Stop listening; the held connection keeps the client's port bound.
   const closed = new Promise((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));
