@@ -72,20 +72,32 @@ export async function pullImage(
 
 // True when the local engine already holds `image`, an image@sha256 reference, under
 // that repository digest. The digest names the content, so the local copy is what a
-// pull would fetch. Any other answer (no such image, unreadable output, no digest)
-// is false, and the caller pulls.
+// pull would fetch. A missing image or unreadable output is false, and the caller
+// pulls; any other inspect failure, a timeout included, is thrown rather than read as
+// an absent image.
 export async function hasLocalRepoDigest(image, { execFile, docker = "docker" } = {}) {
   const digest = /@sha256:([a-f0-9]{64})$/i.exec(image ?? "")?.[1]?.toLowerCase();
   if (!digest) {
     return false;
   }
-  let repoDigests;
+  let stdout;
   try {
-    const { stdout } = await execFile(
+    ({ stdout } = await execFile(
       docker,
       ["image", "inspect", "--format", "{{json .RepoDigests}}", image],
       { timeoutMs: 60_000 },
-    );
+    ));
+  } catch (error) {
+    if (
+      error?.timedOut !== true &&
+      /No such (?:image|object)|image not known/i.test(String(error?.stderr ?? ""))
+    ) {
+      return false;
+    }
+    throw error;
+  }
+  let repoDigests;
+  try {
     repoDigests = JSON.parse(String(stdout).trim() || "[]");
   } catch {
     return false;

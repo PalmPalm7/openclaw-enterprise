@@ -69,20 +69,17 @@ test("prepareLogging registers an owned Collector backend before starting Docker
 test("prepareLogging pulls the Collector image only when the engine lacks its digest", async (t) => {
   // `docker pull` asks the registry even for a held digest; the logging-collector lane
   // pulls the image in prepare, so a stalled registry must not reach the test timeout.
+  const otherDigest = collectorImage.replace(/sha256:[a-f0-9]{64}$/, `sha256:${"b".repeat(64)}`);
   for (const { name, repoDigests, pulled } of [
     { name: "held digest", repoDigests: [collectorImage], pulled: false },
-    {
-      name: "other digest",
-      repoDigests: [`registry.example/otelcol@sha256:${"b".repeat(64)}`],
-      pulled: true,
-    },
+    { name: "other digest", repoDigests: [otherDigest], pulled: true },
     { name: "missing image", repoDigests: undefined, pulled: true },
   ]) {
     await t.test(name, async (t) => {
       const root = await fixture(t);
       const calls = [];
       const execFile = async (command, args) => {
-        calls.push(args.slice(0, 2));
+        calls.push(args);
         if (args[0] === "image" && args[1] === "inspect") {
           if (repoDigests === undefined) {
             throw Object.assign(new Error("inspect failed"), {
@@ -105,13 +102,50 @@ test("prepareLogging pulls the Collector image only when the engine lacks its di
         registerResource: async (kind, resource) => ({ id: "resource-1", kind, ...resource }),
         waitForReady: false,
       });
-      assert.equal(
-        calls.some(([command]) => command === "pull"),
-        pulled,
-      );
-      assert.ok(calls.some(([command]) => command === "run"));
+      const inspect = calls.findIndex(([command, sub]) => command === "image" && sub === "inspect");
+      const pull = calls.findIndex(([command]) => command === "pull");
+      const run = calls.findIndex(([command]) => command === "run");
+      assert.equal(calls[inspect].at(-1), collectorImage);
+      assert.ok(inspect < run);
+      if (pulled) {
+        assert.deepEqual(calls[pull], ["pull", collectorImage]);
+        assert.ok(inspect < pull && pull < run);
+      } else {
+        assert.equal(pull, -1);
+      }
     });
   }
+});
+
+test("prepareLogging stops when the engine cannot answer the image inspect", async (t) => {
+  const root = await fixture(t);
+  const calls = [];
+  const execFile = async (command, args) => {
+    calls.push(args);
+    if (args[0] === "image" && args[1] === "inspect") {
+      throw Object.assign(new Error("inspect timed out"), { timedOut: true, stderr: "" });
+    }
+    return { stdout: "container-id\n", stderr: "" };
+  };
+  await assert.rejects(
+    prepareLogging({
+      laneName: "logging-collector",
+      directory: root,
+      env: {
+        OCC_DOCKER_BIN: "docker",
+        OCC_TEST_LOGGING_COLLECTOR_IMAGE: collectorImage,
+        OCC_CI_OTEL_BACKEND_BIND_ADDRESS: "127.0.0.1",
+      },
+      execFile,
+      registerResource: async (kind, resource) => ({ id: "resource-1", kind, ...resource }),
+      waitForReady: false,
+    }),
+    /inspect timed out/,
+  );
+  assert.equal(
+    calls.some(([command]) => command === "pull" || command === "run"),
+    false,
+  );
 });
 
 test("prepareLogging installs k3d Collector from the canonical Helm template", async (t) => {
