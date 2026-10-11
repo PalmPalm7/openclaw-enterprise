@@ -29,8 +29,12 @@ export function withDevUpModelKey(keyFile, body) {
       t.signal?.throwIfAborted();
       const modelKey = await protectedText(keyFile, "Development model API key");
       registerQaSecret(JSON.stringify(modelKey).slice(1, -1));
+      const hasControl = [...modelKey].some((character) => {
+        const code = character.codePointAt(0);
+        return code < 32 || code === 127;
+      });
       assert.ok(
-        !/[\s\u0000-\u001f\u007f]/u.test(modelKey) && !/^[{["]/u.test(modelKey),
+        !hasControl && !/\s/u.test(modelKey) && !/^[{["]/u.test(modelKey),
         "Development model API key must be a single token, not a credential bundle",
       );
       t.signal?.throwIfAborted();
