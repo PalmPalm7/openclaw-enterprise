@@ -582,3 +582,69 @@ test("development proof omits diagnostic metadata that equals a registered crede
     assert.match(safe.message, /cleanup failed/);
   }
 });
+
+test(
+  "development proof cleanup diagnostics preserve recovery context and a sanitized cause",
+  { timeout: 10_000 },
+  async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "dev-up-cleanup-error-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const keyFile = join(directory, "key");
+    const value = 'synthetic-cleanup-quote"-backslash\\-end';
+    await writeFile(keyFile, value, { mode: 0o600 });
+    const helper = new URL("../helpers/dev-up-test-auth.mjs", import.meta.url).href;
+    const source = `
+    import assert from 'node:assert/strict';
+    import test from 'node:test';
+    import { withDevUpModelKey, devUpTestError } from ${JSON.stringify(helper)};
+    test('intentional cleanup failure', withDevUpModelKey(${JSON.stringify(keyFile)}, async (t, key) => {
+      t.after(() => {
+        const original = Object.assign(new Error('cleanup command failed: ' + key + ' ' + JSON.stringify(key)), {
+          code: 'EACCES', signal: 'SIGTERM', cause: new Error(key),
+          stdout: key, stderr: key, actual: key, expected: key,
+        });
+        const context = 'Development cleanup failed; recovery state preserved at /owned/synthetic/state. ' + key + ' ' + JSON.stringify(key);
+        const safe = devUpTestError(original, context);
+        assert.notEqual(safe.cause, original);
+        assert.equal(original.stdout, key);
+        assert.equal(safe.cause.code, 'EACCES');
+        assert.equal(safe.cause.signal, 'SIGTERM');
+        for (const field of ['cause', 'stdout', 'stderr', 'actual', 'expected']) {
+          assert.equal(Object.hasOwn(safe.cause, field), false);
+        }
+        process.stdout.write(JSON.stringify(safe) + '\\n');
+        throw safe;
+      });
+    }));
+  `;
+    const child = spawn(process.execPath, ["--input-type=module", "-e", source], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    t.after(() => {
+      if (child.exitCode === null) {
+        child.kill("SIGKILL");
+      }
+    });
+    const output = { stdout: "", stderr: "" };
+    for (const name of ["stdout", "stderr"]) {
+      child[name].on("data", (chunk) => {
+        output[name] += chunk;
+      });
+    }
+    const code = await new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", resolve);
+    });
+    assert.equal(code, 1);
+    for (const text of Object.values(output)) {
+      assert.ok(!text.includes(value));
+      assert.ok(!text.includes(JSON.stringify(value).slice(1, -1)));
+    }
+    const diagnostic = output.stdout + output.stderr;
+    assert.match(diagnostic, /hookFailed/);
+    assert.match(diagnostic, /recovery state preserved at \/owned\/synthetic\/state/);
+    assert.match(diagnostic, /cleanup command failed/);
+    assert.match(diagnostic, /EACCES/);
+    assert.match(diagnostic, /SIGTERM/);
+  },
+);

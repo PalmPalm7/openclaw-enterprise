@@ -9,7 +9,7 @@ import {
 } from "./qa-secrets.mjs";
 
 // Do not preserve raw causes, command output or assertion actual/expected fields.
-export function devUpTestError(error) {
+export function devUpTestError(error, context) {
   const detail = qaCommandFailureDetail(error?.message ?? "Development proof failed", {});
   const result = new Error(detail || "Development proof failed");
   const code = error?.code;
@@ -26,7 +26,12 @@ export function devUpTestError(error) {
   ) {
     result.signal = error.signal;
   }
-  return result;
+  if (context === undefined) {
+    return result;
+  }
+  // Build both parts at the redaction boundary, never attach the original error.
+  const message = qaCommandFailureDetail(context, {});
+  return new Error(message || "Development proof failed", { cause: result });
 }
 
 // The returned test callback reads nothing until node:test selects this case.

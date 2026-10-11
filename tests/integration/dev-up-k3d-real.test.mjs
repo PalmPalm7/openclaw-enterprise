@@ -234,11 +234,9 @@ test(
             timeout: 300_000,
           });
         } catch (error) {
-          throw new Error(
+          throw devUpTestError(
+            error,
             `Development cleanup failed; recovery state preserved at ${stateDirectory}.`,
-            {
-              cause: devUpTestError(error),
-            },
           );
         }
       }
