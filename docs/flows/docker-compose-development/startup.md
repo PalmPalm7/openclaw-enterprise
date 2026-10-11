@@ -325,7 +325,7 @@ owns OpenShell Gateway placement and per-Namespace workspace resources.
 
 After API/worker readiness, both bootstrap readers verify private temporary key
 copies through a startup-cancellation-bound `occclient` Installation request,
-then export exclusively. Key IDs must match bootstrap output; cancellation starts
+then export exclusively. Installation IDs must match bootstrap output; cancellation starts
 owned cleanup. OpenShell also awaits its bootstrap Namespace/operator-mode
 Workspace. Namespace readiness and repository discovery use
 `occclient.Client.WithContext` for polling deadlines, preserving the original client.
