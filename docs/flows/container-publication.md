@@ -77,18 +77,14 @@ The standard AMD64 override requires 36 GiB free and, only below that, runs
 guarded toolchain cleanup that checks required roots and skips unsafe paths.
 Larger runners do not depend on deleting preinstalled SDKs.
 
-Each Buildx builder runs at most two steps concurrently. The default Blacksmith
-runners retain BuildKit layers on a sticky disk scoped by image and architecture,
-so builds do not export the large intermediate cache over the network. A custom
-non-Blacksmith runner uses the GitHub Actions cache with the same scope.
-Maintainers can also dispatch `container-check.yml`, or a manual `CI` run that
-calls it, on a branch for native image verification. It has no publication job or
-package-write permission.
-The build exports
-an OCI directory without registry publication or credentials.
-Before Buildx runs, the workflow derives `SOURCE_DATE_EPOCH` from the exact
-source commit. BuildKit rewrites image and filesystem timestamps to that epoch,
-so wall-clock time does not change the image manifests on a cold-cache rebuild.
+Each Buildx builder runs at most two concurrent steps. Default Blacksmith runners
+keep image/architecture-scoped BuildKit layers on sticky disks; custom runners
+use equivalently scoped GitHub Actions caches. Maintainers can dispatch
+`container-check.yml` directly or through manual branch `CI`, without publication
+or package-write permission. Builds export OCI directories without registry
+credentials. Before Buildx, the workflow derives `SOURCE_DATE_EPOCH` from the
+exact source commit; BuildKit rewrites image/filesystem timestamps to it, excluding
+wall-clock time from cold-cache rebuild manifests.
 
 `deploy/runtime/Dockerfile:openclaw-source` verifies the pinned OpenClaw main source archive
 and applies three patches whose hashes it verifies and records in runtime provenance:
@@ -115,15 +111,13 @@ local npm scripts do not trigger a separate version-check network request.
 See the [runtime defaults](../../deploy/runtime/README.md) for scope.
 
 `scripts/build-runtime-assets.mjs` removes development/QA source, extension tests,
-and documentation media, while retaining runtime templates, skills, and help.
-It follows importer-relative runtime dependencies to remove unreachable pnpm
-store entries without collapsing distinct package versions. It writes initial
-provenance containing source, patch, lockfile, and inventory hashes. The runtime
-copies the assembled directory directly; there is no gzip archive or second
-Codex installation. After final-stage permission normalization, the inventory
-helper rewrites `contents.json` from `/app/node_modules/openclaw` and updates
-`runtimeContentsSha256` and the stock `codex` package/binary identity. Provenance
-therefore describes the final runtime tree. Upstream
+and documentation media, retaining runtime templates, skills, and help. It prunes
+unreachable pnpm entries through importer-relative dependencies, preserving
+distinct versions, and records source/patch/lockfile/inventory hashes. Runtime
+copies this directory without gzip or a second Codex installation. After
+final-stage permission normalization, the inventory helper regenerates
+`contents.json` from `/app/node_modules/openclaw`, updating `runtimeContentsSha256`
+and stock `codex` package/binary identity to describe the final tree. Upstream
 import-closure and native-addon checks remain. See the
 [runtime recipe](../../deploy/runtime/README.md).
 
@@ -137,15 +131,14 @@ to the source, workflow, run/attempt, CI evidence, image, and build base. Failed
 smokes cannot upload platform artifacts. The temporary loaded image is removed.
 
 `.github/workflows/container-publish.yml:jobs.assemble` downloads both successful
-platform artifacts from this exact run/attempt. `container-release.mjs:assemble`
-rejects mismatched receipts, platform configs, blob sizes, or hashes before linking
-blobs into one OCI layout. It retains only the manifest media type, digest, size,
-and platform in each assembled descriptor, excluding exporter-only annotations
-such as the build time and local reference name. It writes the multi-platform
-index and archive without rebuilding either variant, then removes the temporary layouts.
-`readArchivePlatforms` checks the archive contains exactly one AMD64 and one ARM64
-Linux manifest with matching config and content digests. Publication still consumes
-this sealed archive; registry access is not needed during assembly.
+platform artifacts from this run/attempt. `container-release.mjs:assemble`
+rejects receipt, config, blob-size, or hash mismatches before linking one OCI
+layout. Descriptors retain only media type, digest, size, and platform, excluding
+exporter annotations such as build time and local names. Assembly writes the
+index/archive without rebuilding and removes temporary layouts.
+`readArchivePlatforms` requires exactly one AMD64 and one ARM64 Linux manifest
+with matching config/content digests. Publication consumes this sealed archive;
+assembly needs no registry access.
 
 Before runtime smoke, `scripts/ci/prepare.mjs:prepareRuntimeImageSmoke` imports
 the loaded config ID into a disposable k3d cluster. It reuses the Images and

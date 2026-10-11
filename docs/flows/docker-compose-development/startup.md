@@ -99,13 +99,12 @@ or PostgreSQL administrator URL.
 
 `compose.yaml:services.bootstrap`, `scripts/bootstrap-installation.mjs`
 
-After migration exits `0`, Compose runs the shared initializer with development
-inputs. Fresh bootstrap creates the human and non-Agent service
-administrators, singleton Installation, native IAM seed, audit evidence, and
-initial service-key response. It also creates the `default` Namespace in `provisioning` state; worker reconciliation later
-provisions its backing Docker boundary. Existing Installations retain their
-Namespaces, accounts, keys, IAM policy, configuration, and revision history; a
-missing, expired, or revoked key never triggers reissue.
+After migration exits `0`, the shared development initializer creates human and
+non-Agent service administrators, the singleton Installation, IAM seed, audit
+evidence, service-key response, and `default` Namespace in `provisioning`.
+Worker reconciliation provisions its Docker boundary. Existing Installations
+retain Namespaces, accounts, keys, IAM policy, configuration, and revision history;
+missing, expired, or revoked keys never trigger reissue.
 
 Only the initializer mounts `occ_bootstrap_data`; the API and worker load
 committed state after initializer success. The
@@ -233,13 +232,13 @@ resolves its host socket from Docker's active context or `podman machine inspect
 Private state records the socket, Compose project, and `occ-dev-*` cluster.
 Cleanup validates and reuses those records, regardless of later context changes.
 
-Startup refuses existing cluster or project resources, validates resolved Compose
-publications with `internal/occdev/compose.go:AnalyzeCompose`, and rejects
-external or unscoped networks and volumes with
-`internal/occdev/up.go:validateResourceOwnership`. It claims the state directory
-by exclusive `0700` creation and privately writes the rendered Compose snapshot
-before creating resources. Before saving, `setKubernetesBridgeGateway` preserves an explicit development-network gateway or uses the rendered subnet's first usable address, supplying k3d's required bridge gateway for subnet overrides. Startup and cleanup both use that snapshot, so later `.env` edits
-cannot change it.
+Startup refuses existing cluster/project resources. `internal/occdev/compose.go:AnalyzeCompose`
+validates resolved publications; `internal/occdev/up.go:validateResourceOwnership`
+rejects external or unscoped networks/volumes. Exclusive `0700` creation claims
+the state directory; startup privately saves the rendered Compose snapshot before
+creating resources. `setKubernetesBridgeGateway` preserves an explicit gateway
+or selects the rendered subnet's first usable address for k3d. Startup and cleanup
+reuse this snapshot, unaffected by later `.env` edits.
 
 With `OCC_DEVELOPMENT_CONTROL_PLANE=kubernetes`, Kubernetes Compute branches
 into `internal/occdev/openshell_k3d.go:upK3d` before Compose rendering, uses the
@@ -248,16 +247,14 @@ Without OpenShell, the Installation selects the bundled Presets and curated
 Codex Plugin Driver, and startup copies the generated administrator password and
 service key into the private state directory.
 
-When repository inputs are selected, `internal/occdev/repository_k3d.go` first
-validates them. After authenticated bootstrap and Namespace readiness, it
-substitutes the server-assigned Namespace ID into the immutable registry,
-generates a CA and exact-host broker certificate, creates separate Kubernetes
-inputs, and upgrades Helm with the selected Repo Driver and worker sidecar.
-Startup fails unless authenticated repository discovery matches the approved
-references and profiles; it proves no model turn, native sandbox, or Git
-operation. The
-[local repository procedure](../../guides/deploy/local-repository-credentials.md#prepare-the-approved-inputs)
-owns the required inputs.
+`internal/occdev/repository_k3d.go` validates selected repository inputs. After
+authenticated bootstrap and Namespace readiness, it binds the server-assigned
+Namespace ID into the immutable registry, generates a CA/exact-host broker
+certificate, creates separate Kubernetes inputs, and upgrades Helm with the
+selected Repo Driver/worker sidecar. Authenticated discovery must match approved
+references/profiles; this proves no model turn, native sandbox, or Git operation.
+The [local repository procedure](../../guides/deploy/local-repository-credentials.md#prepare-the-approved-inputs)
+owns required inputs.
 
 The default `OCC_DEVELOPMENT_CONTROL_PLANE=compose` uses the Compose snapshot.
 Unsupported values fail before resource creation. The
@@ -286,18 +283,19 @@ cluster's internal load-balancer hostname with TLS verification. It and the
 container configuration are readable by non-root containers behind the private
 host directory and mounted read-only into the API and Kubernetes worker. Neither receives the engine socket.
 
-The lifecycle imports runtime and OpenShell images under engine-recorded names,
-including Podman `localhost/` tags and Docker Hub familiar names. `internal/occdev/kubernetes.go:engineImageReference` treats an omitted tag as
-`:latest` and rejects missing or ambiguous matches. `importDevelopmentImage` owns
-the subsequent import and in-cluster digest resolution. Both Docker and Podman
-export the recorded image to an archive in owned state; Docker also selects the
-Linux platform with `image save --platform`. `internal/occdev/k3d_import.go:importArchiveDirect`
-uses `k3d image import --mode direct`, with bounded retries only for the known
-closed-stream race. Archive cleanup runs on success and failure; original tagged
-images remain. Containerd must report the imported digest before startup records
-an immutable reference. Before `writeInstallation`, `internal/occdev/up.go:Up` and
+Runtime and OpenShell imports use engine-recorded names, including Podman
+`localhost/` tags and Docker Hub familiar names.
+`internal/occdev/kubernetes.go:engineImageReference` defaults omitted tags to
+`:latest`, rejecting missing/ambiguous matches. `importDevelopmentImage` exports
+both engines' images into owned-state archives; Docker selects the Linux platform
+with `image save --platform`. `internal/occdev/k3d_import.go:importArchiveDirect`
+uses `k3d image import --mode direct`, retrying only the known closed-stream race
+within its bound. Success/failure removes archives, retaining original tags.
+Containerd digest registration precedes immutable-reference recording.
+Before `writeInstallation`, `internal/occdev/up.go:Up` and
 `internal/occdev/openshell_k3d.go:upK3d` call
-`internal/occdev/status_proxy_k3d.go:developmentStatusProxySource`. Node inventory keeps caller context outside polling.
+`internal/occdev/status_proxy_k3d.go:developmentStatusProxySource`; node inventory
+keeps caller context outside polling.
 
 `internal/occdev/up.go:poll` bounds route queries to two minutes via `internal/occdev/command.go:command`
 (`exec.CommandContext`), so deadline or cancellation stops blocked queries; default
@@ -325,13 +323,12 @@ owns OpenShell Gateway placement and per-Namespace workspace resources.
 `internal/occdev/down.go:Down`, `internal/occdev/down.go:cleanup`,
 `internal/occdev/state.go:readState`.
 
-After API and worker readiness, both bootstrap readers read private temporary
-key copies and bind the `occclient` Installation request to startup cancellation
-before exporting the key exclusively. Its ID
-must match bootstrap output. Cancellation fails verification and starts owned
-cleanup. OpenShell also waits for its bootstrap Namespace and operator-mode Workspace.
-Namespace readiness and repository discovery apply their polling deadline
-through `occclient.Client.WithContext`, preserving the original client.
+After API/worker readiness, both bootstrap readers verify private temporary key
+copies through a startup-cancellation-bound `occclient` Installation request,
+then export exclusively. Key IDs must match bootstrap output; cancellation starts
+owned cleanup. OpenShell also awaits its bootstrap Namespace/operator-mode
+Workspace. Namespace readiness and repository discovery use
+`occclient.Client.WithContext` for polling deadlines, preserving the original client.
 
 Both Kubernetes profiles pass `OCC_DEVELOPMENT_STARTUP_TIMEOUT_SECONDS` to `k3d cluster create --timeout`; node readiness timeout fails startup.
 
@@ -340,12 +337,12 @@ permission setting, writing, or closing fails, including a partial external key
 before startup records a successful copy. Existing targets stay untouched; a
 removal failure is returned with the original file-operation error.
 
-On failure, startup attempts cleanup. Explicit Kubernetes shutdown validates the
-marker, state, and Compose snapshot, then uses the recorded engine endpoint.
-Cleanup stops the API and worker, then deletes the named k3d cluster and Compose
-project volumes. Cleanup continues after individual errors, retaining state on any failure; complete cleanup removes the state directory and helper-owned key. A
-returned external `--key-output` file stays operator-owned; startup removes a
-newly written external key if a later OpenShell readiness step fails.
+Startup failures trigger cleanup. Explicit Kubernetes shutdown validates marker,
+state, and Compose snapshot, then uses the recorded engine endpoint. It stops
+API/worker and deletes the named k3d cluster and Compose volumes, continuing after
+errors. Any failure retains state; success removes state/helper-owned key.
+Returned external `--key-output` files remain operator-owned; a later OpenShell
+readiness failure removes a newly written external key.
 
 ## Debugging and Verification
 
