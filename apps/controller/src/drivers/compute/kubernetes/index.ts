@@ -2748,7 +2748,14 @@ export class KubernetesComputeDriver implements ComputeDriver {
         }
         throw error;
       }
-      required(options.runtime.gatewayStorageClassName, "SQLite-compatible gateway storage class");
+      const gatewayStorageClassName = required(
+        options.runtime.gatewayStorageClassName,
+        "SQLite-compatible gateway storage class",
+      );
+      validateKubernetesResourceName(
+        gatewayStorageClassName,
+        "SQLite-compatible gateway storage class",
+      );
       const nativeOpenClawSessionCapacity = options.runtime.nativeOpenClawSessionCapacity;
       if (
         nativeOpenClawSessionCapacity !== undefined &&
@@ -6249,6 +6256,9 @@ export class KubernetesComputeDriver implements ComputeDriver {
       await this.shutdownRevisionRuntime(revision, namespace);
       await this.waitForRevisionPodsToTerminate(revision, gatewayNamespace, "gateway");
     } else {
+      // The Gateway drains into the running Harness. An Agent stop's drain wait may yield
+      // (withYieldingGatewayDrain): the Harness then keeps running until a retry sees the
+      // Gateway's Pods gone (finding 1088).
       await this.removeStoppedGateway(revision, namespace);
       await this.shutdownRevisionRuntime(revision, namespace);
     }
@@ -6433,14 +6443,15 @@ export class KubernetesComputeDriver implements ComputeDriver {
           "The AgentRevision workload Pods did not terminate before the deadline.",
         );
       }
-      // A refused candidate's stop does not hold the serial worker while its Pods terminate:
-      // other Work runs, and the next pass repeats the whole stop (finding 1022).
+      // A refused candidate's stop does not hold the serial worker while its Pods terminate, nor
+      // does an ordinary stop while its Gateway drains: other Work runs, and the next pass repeats
+      // the whole stop (findings 1022 and 1088).
       if (
         yieldCheckedAt === undefined ||
         Date.now() - yieldCheckedAt >= WORKLOAD_TERMINATION_YIELD_CHECK_MS
       ) {
         yieldCheckedAt = Date.now();
-        if (await computeStopShouldYield()) {
+        if (await computeStopShouldYield(role)) {
           throw new ComputeStopYieldedError(
             "The AgentRevision workload Pods are still terminating; other work is waiting.",
           );
@@ -8421,7 +8432,17 @@ export class KubernetesComputeDriver implements ComputeDriver {
   }
 
   private validIsoTimestamp(value: unknown): value is string {
-    return typeof value === "string" && !Number.isNaN(Date.parse(value));
+    if (typeof value !== "string") {
+      return false;
+    }
+    const canonical = RUNTIME_DIAGNOSTIC_TIMESTAMP.test(value)
+      ? value
+      : value.replace(/Z$/u, ".000Z");
+    if (!RUNTIME_DIAGNOSTIC_TIMESTAMP.test(canonical)) {
+      return false;
+    }
+    const parsed = new Date(value);
+    return !Number.isNaN(parsed.getTime()) && parsed.toISOString() === canonical;
   }
 
   private cachedRuntimeFailureEvidence(
