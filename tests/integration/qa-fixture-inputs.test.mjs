@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import {
+  chmod,
+  mkdtemp,
+  open,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -423,12 +434,26 @@ test("development proof key admission precedes the selected case body", async (t
   }
   assert.equal(calls, 0, "invalid input cannot admit any startup or port allocation");
   await writeFile(keyFile, " synthetic-development-token\n");
-  const before = await stat(keyFile);
-  await withDevUpModelKey(keyFile, body)(t);
-  assert.equal(calls, 1);
-  assert.equal(await readFile(keyFile, "utf8"), " synthetic-development-token\n");
-  assert.equal((await stat(keyFile)).ino, before.ino);
-  assert.equal((await stat(keyFile)).mode, before.mode);
+  const readFlags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+  const beforeFile = await open(keyFile, readFlags);
+  try {
+    const before = await beforeFile.stat();
+    await withDevUpModelKey(keyFile, body)(t);
+    assert.equal(calls, 1);
+    // Reopen the current path to detect replacement, without following a substituted symlink.
+    const afterFile = await open(keyFile, readFlags);
+    try {
+      const after = await afterFile.stat();
+      assert.equal(await afterFile.readFile("utf8"), " synthetic-development-token\n");
+      assert.equal(after.dev, before.dev);
+      assert.equal(after.ino, before.ino);
+      assert.equal(after.mode, before.mode);
+    } finally {
+      await afterFile.close();
+    }
+  } finally {
+    await beforeFile.close();
+  }
   const cancelled = new AbortController();
   const pending = withDevUpModelKey(keyFile, body)({ signal: cancelled.signal });
   cancelled.abort(new Error("preflight cancelled"));
@@ -489,11 +514,12 @@ test("development proof sends the key only to Secret creation and renders the ge
   assert.deepEqual(result, { data: { workId: "work-1" } });
 });
 
-test("development proof never submits a dependent or duplicate request after an unknown response", async () => {
+test("development proof propagates POST rejection without helper retry or dependent submission", async () => {
   const { provisionDevUpSandboxAgent } = await import("../helpers/dev-up-test-auth.mjs");
   const preset = JSON.parse(
     await readFile(new URL("../../deploy/presets/standard-codex.json", import.meta.url), "utf8"),
   );
+  // Injected rejection checks helper orchestration, not HTTP commitment or transport retries.
   for (const failedCall of [1, 2]) {
     let calls = 0;
     const unknown = new Error("transport ended without a response");
