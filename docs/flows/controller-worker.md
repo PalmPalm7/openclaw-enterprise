@@ -385,7 +385,9 @@ failed retry keeps the active runtime.
   the following `worker.completed` retry.
 - [Revision](../../tests/integration/postgres-worker-agent-revision.test.mjs),
   [health](../../tests/integration/postgres-worker-agent-revision-health.test.mjs),
+  [replacement](../../tests/integration/postgres-worker-agent-revision-replacement.test.mjs),
   [refused-stop](../../tests/integration/postgres-worker-agent-revision-refused-stop.test.mjs),
+  [refused-wait](../../tests/integration/postgres-worker-agent-revision-refused-wait.test.mjs),
   [teardown](../../tests/integration/postgres-worker-agent-revision-teardown.test.mjs) and
   [stale-claim](../../tests/integration/postgres-worker-stale-claim.test.mjs) tests
   require PostgreSQL; none proves model execution.

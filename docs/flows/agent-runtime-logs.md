@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
-updated: 2026-10-10
-last_updated_session: authoring-run/b0c35eb4-2b87-4f3e-aec3-8c416cdef3bb
+updated: 2026-10-11
+last_updated_session: issue-2114
 ---
 
 # Agent runtime logs flow
@@ -210,8 +210,9 @@ console remembers a `403` from either route for the signed-in operator for the
 page session, so reopening the Logs tab adds no audited denial, and another
 operator signing in on the tab asks again. Its status message names the
 log-text grants too. On the Gateway source it points to the Harness source while
-no Harness Pod is ready, or to Deployment activity while none exists. The
-CLI's `--follow` loop re-sends the cursor every 2 seconds.
+no Harness Pod is ready, or to Deployment activity while none exists. The CLI rejects explicit zero or positive sub-second `--since` before revision
+selection or API client setup; omission keeps the unfiltered default. Its
+`--follow` loop re-sends the cursor every 2 seconds.
 `internal/occcli/agent_runtime.go:runAgentLogs` treats command-context cancellation as a
 clean follow exit during both initial revision selection and page polling.
 Without `--follow`, a canceled request remains an error. Driver errors map to
@@ -220,26 +221,20 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 ## Debugging and Verification
 
 - `go test ./internal/occcli -run '^TestResourceRequestStopsWhenCommandContextIsCanceled$'`
-  exercises the real CLI and HTTP client against a loopback server, canceling
-  in-flight Agent and revision lookups. Follow exits successfully; one-shot reads
-  retain cancellation errors. This proves local CLI cancellation, not deployed OCC.
+  proves loopback CLI cancellation: follow exits cleanly, while one-shot reads
+  retain the error. It is not deployed OCC proof.
 
 - `503 RUNTIME_LOGS_CLUSTER_RBAC` means the API ServiceAccount lacks
   `pods/log`, `events` or, on an execution cluster, `pods` reads in that
   namespace. `503 RUNTIME_LOGS_AUDIT_UNAVAILABLE` means no output was read.
 - `tests/conformance/runtime-logs-content.test.mjs` plants credentials, prompts
   and protocol lines through the real handler; `occ-api-security.test.mjs` covers
-  tiers, cursors and failures; `kubernetes-compute.test.mjs` covers plane
-  selection, Event filtering and the typed `403`. These use in-memory Kubernetes
-  responses; `agent-runtime-logs-k3d-real.test.mjs` reads a real cluster.
-  The same content suite exercises the real reader, cursor and sanitizer with
-  synthetic Driver pages: cross-poll masking, replay/eviction, uncertain times,
-  cuts, paired-field validation and stream/view resets. A separate handler case
-  checks the serialized cursor through the supported controller fixture. These
-  controls do not establish real-cluster behavior.
-  `runtime-logs-sandbox.test.mjs` drives the sandbox source through the real
-  handler and OpenShell Driver with a gateway client that answers only
-  `GetSandboxLogs`; `openshell-gateway-wire.test.mjs` checks the wire shape.
+  tiers and cursors; `kubernetes-compute.test.mjs` covers plane selection and
+  Events. These use in-memory Kubernetes responses. The content suite also covers
+  masking, replay, cuts, field validation and stream resets; a handler case checks
+  cursor serialization. `agent-runtime-logs-k3d-real.test.mjs` reads a real cluster.
+  `runtime-logs-sandbox.test.mjs` drives the OpenShell source through the handler;
+  `openshell-gateway-wire.test.mjs` checks the wire shape.
 
 ## Related docs
 
@@ -252,6 +247,10 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-11 09:10: Reject sub-second runtime-log `--since` before any API request. (issue-2114 - 724b37bd1630f0b066bb2cbc23e3e965d172f9a7)
+
+- 2026-10-11 08:15: Distinguish an omitted runtime-log `--since` from an explicit zero and refuse the latter before any API request. (issue-2109 - 731db98bbbc8e5296571e64130ac62482413520e)
 
 - 2026-10-10 07:06: Merge main; preserve initial continuation, timestamps, Events, termination and histories. (authoring-run/b0c35eb4-2b87-4f3e-aec3-8c416cdef3bb - b744ee6f217d17942cdaacea80cbbd08126aa87f)
 
