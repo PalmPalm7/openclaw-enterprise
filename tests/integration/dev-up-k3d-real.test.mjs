@@ -10,6 +10,11 @@ import { delimiter, join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { availablePort } from "../helpers/available-port.mjs";
+import {
+  devUpTestError,
+  provisionDevUpSandboxAgent,
+  withDevUpModelKey,
+} from "../helpers/dev-up-test-auth.mjs";
 
 const { loadYaml } = createRequire(new URL("../../apps/controller/package.json", import.meta.url))(
   "@kubernetes/client-node",
@@ -191,7 +196,7 @@ test(
     skip: selected ? false : "Set OCC_TEST_DEV_UP_K3D_REAL=1 to run the real development profile.",
     timeout: 1_200_000,
   },
-  async (t) => {
+  withDevUpModelKey(process.env.OCC_TEST_DEV_UP_MODEL_KEY_FILE, async (t, modelKey) => {
     const root = await mkdtemp(join(tmpdir(), "oce-dev-up-k3d-real-"));
     const stateDirectory = join(root, "state");
     const cluster = `occ-dev-k3d-${randomUUID().slice(0, 8)}`;
@@ -232,7 +237,7 @@ test(
           throw new Error(
             `Development cleanup failed; recovery state preserved at ${stateDirectory}.`,
             {
-              cause: error,
+              cause: devUpTestError(error),
             },
           );
         }
@@ -403,17 +408,8 @@ test(
     assert.ok(
       catalog.data.plugins.some(({ id }) => id === "codex-plugin:linear@openai-curated-remote"),
     );
-    // Provision the shipped dedicated Codex Preset through the same API used by
-    // the console. This synthetic Secret is not a live credential and cannot
-    // satisfy Codex's native startup probe; successful deployment needs test auth.
-    const { renderPresetTemplate } = await import("../../packages/contracts/src/index.ts");
+    // Use the operator-provided Secret through normal dedicated Harness authentication.
     const preset = presets.data.find(({ name }) => name === "Standard Codex");
-    const rendered = renderPresetTemplate(preset.template, {
-      name: "Local sandbox proof",
-      model: "gpt-6-astra",
-      modelSecret: "synthetic-local-sandbox-key",
-    });
-    rendered.configuration.values.gateway.controlUi.enabled = false;
     const post = async (path, body, expected) => {
       const response = await fetch(`http://127.0.0.1:${apiPort}${path}`, {
         method: "POST",
@@ -424,24 +420,13 @@ test(
       assert.equal(response.status, expected, `Unexpected status for ${path}`);
       return response.json();
     };
-    const secret = await post(
-      `/namespaces/${namespace.id}/secrets`,
-      {
-        name: "Local sandbox proof",
-        value: "synthetic-local-sandbox-key",
-      },
-      201,
-    );
-    const admitted = await post(
-      `/namespaces/${namespace.id}/agents/provision`,
-      {
-        requestId: `req_${randomUUID()}`,
-        ...rendered.agent,
-        harnessAuth: { method: "api_key", source: secret.data.ref },
-        configuration: { kind: "agent", ...rendered.configuration },
-      },
-      202,
-    );
+    const admitted = await provisionDevUpSandboxAgent({
+      post,
+      namespaceId: namespace.id,
+      preset,
+      modelKey,
+      requestId: `req_${randomUUID()}`,
+    });
     const deadline = Date.now() + 300_000;
     let provisioned;
     while (Date.now() < deadline) {
@@ -595,7 +580,7 @@ test(
       pods.items.some(({ metadata }) => metadata.name.includes("openshell")),
       false,
     );
-  },
+  }),
 );
 
 test(

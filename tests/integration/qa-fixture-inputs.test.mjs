@@ -383,3 +383,188 @@ test("QA log redaction hides each line of a registered multi-line secret", async
   assert.equal(lines.at(-1), "done");
   assert.doesNotMatch(lines.join("\n"), /fixtureLine/);
 });
+
+test("development proof key admission precedes the selected case body", async (t) => {
+  const { withDevUpModelKey } = await import("../helpers/dev-up-test-auth.mjs");
+  const directory = await mkdtemp(join(tmpdir(), "dev-up-auth-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const keyFile = join(directory, "key");
+  let calls = 0;
+  const body = async (_context, key) => {
+    calls += 1;
+    assert.equal(key, "synthetic-development-token");
+  };
+  // Registration must not read the key: excluded node:test cases remain key-free.
+  const unselected = withDevUpModelKey(join(directory, "missing"), body);
+  assert.equal(typeof unselected, "function");
+  for (const path of [undefined, "relative-key", join(directory, "missing")]) {
+    await assert.rejects(withDevUpModelKey(path, body)(t));
+  }
+  await writeFile(keyFile, "synthetic-development-token\n", { mode: 0o600 });
+  const link = join(directory, "link");
+  await symlink(keyFile, link);
+  await assert.rejects(withDevUpModelKey(link, body)(t), { code: "ELOOP" });
+  await assert.rejects(withDevUpModelKey(directory, body)(t), /private regular file/);
+  await chmod(keyFile, 0o644);
+  await assert.rejects(withDevUpModelKey(keyFile, body)(t), /private regular file/);
+  await chmod(keyFile, 0o600);
+  for (const value of [
+    "",
+    " \n",
+    "two tokens",
+    "line\nbreak",
+    "nul\0byte",
+    '{"key":"bundle"}',
+    '["bundle"]',
+    '"quoted"',
+  ]) {
+    await writeFile(keyFile, value);
+    await assert.rejects(withDevUpModelKey(keyFile, body)(t));
+  }
+  assert.equal(calls, 0, "invalid input cannot admit any startup or port allocation");
+  await writeFile(keyFile, " synthetic-development-token\n");
+  const before = await stat(keyFile);
+  await withDevUpModelKey(keyFile, body)(t);
+  assert.equal(calls, 1);
+  assert.equal(await readFile(keyFile, "utf8"), " synthetic-development-token\n");
+  assert.equal((await stat(keyFile)).ino, before.ino);
+  assert.equal((await stat(keyFile)).mode, before.mode);
+  const cancelled = new AbortController();
+  const pending = withDevUpModelKey(keyFile, body)({ signal: cancelled.signal });
+  cancelled.abort(new Error("preflight cancelled"));
+  await assert.rejects(pending, /preflight cancelled/);
+  assert.equal(calls, 1, "cancellation during file admission cannot start the body");
+});
+
+test("development proof sends the key only to Secret creation and renders the genuine preset by reference", async () => {
+  const { provisionDevUpSandboxAgent } = await import("../helpers/dev-up-test-auth.mjs");
+  const preset = JSON.parse(
+    await readFile(new URL("../../deploy/presets/standard-codex.json", import.meta.url), "utf8"),
+  );
+  const original = structuredClone(preset);
+  const modelKey = "synthetic-routing-token";
+  const ref = { kind: "secret", namespaceId: "namespace-1", id: "secret-1" };
+  const calls = [];
+  const result = await provisionDevUpSandboxAgent({
+    namespaceId: "namespace-1",
+    preset,
+    modelKey,
+    requestId: "request-1",
+    async post(path, body, expected) {
+      calls.push({ path, body, expected });
+      return calls.length === 1 ? { data: { ref } } : { data: { workId: "work-1" } };
+    },
+  });
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0], {
+    path: "/namespaces/namespace-1/secrets",
+    body: { name: "Local sandbox proof", value: modelKey },
+    expected: 201,
+  });
+  const provision = calls[1];
+  assert.equal(provision.path, "/namespaces/namespace-1/agents/provision");
+  assert.equal(provision.expected, 202);
+  assert.deepEqual(provision.body.harnessAuth, { method: "api_key", source: ref });
+  assert.equal(provision.body.executionMode, "dedicated");
+  assert.equal(provision.body.requestId, "request-1");
+  assert.equal(provision.body.configuration.values.agents.defaults.model, "codex/gpt-6-astra");
+  assert.equal(provision.body.configuration.values.gateway.controlUi.enabled, false);
+  assert.equal(
+    provision.body.configuration.values.plugins.entries.codex.config.appServer.sandbox,
+    "workspace-write",
+  );
+  const configuration = structuredClone(original.template.configuration);
+  configuration.values.gateway.controlUi.enabled = false;
+  configuration.values.agents.defaults.model = "codex/gpt-6-astra";
+  configuration.values.agents.defaults.models = {
+    "codex/gpt-6-astra": configuration.values.agents.defaults.models["codex/{{ vars.model }}"],
+  };
+  configuration.values.models.providers.codex.models[0] = {
+    id: "gpt-6-astra",
+    name: "gpt-6-astra",
+  };
+  assert.deepEqual(provision.body.configuration, { kind: "agent", ...configuration });
+  assert.ok(!JSON.stringify(provision).includes(modelKey));
+  assert.deepEqual(preset, original);
+  assert.deepEqual(result, { data: { workId: "work-1" } });
+});
+
+test("development proof never submits a dependent or duplicate request after an unknown response", async () => {
+  const { provisionDevUpSandboxAgent } = await import("../helpers/dev-up-test-auth.mjs");
+  const preset = JSON.parse(
+    await readFile(new URL("../../deploy/presets/standard-codex.json", import.meta.url), "utf8"),
+  );
+  for (const failedCall of [1, 2]) {
+    let calls = 0;
+    const unknown = new Error("transport ended without a response");
+    await assert.rejects(
+      provisionDevUpSandboxAgent({
+        namespaceId: "namespace-1",
+        preset,
+        modelKey: "synthetic-unknown-token",
+        requestId: "request-1",
+        async post() {
+          calls += 1;
+          if (calls === failedCall) {
+            throw unknown;
+          }
+          return { data: { ref: { kind: "secret", namespaceId: "namespace-1", id: "secret-1" } } };
+        },
+      }),
+      (error) => error === unknown,
+    );
+    assert.equal(calls, failedCall);
+  }
+});
+
+test(
+  "development proof errors omit secret-bearing fields from actual node:test output",
+  { timeout: 10_000 },
+  async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "dev-up-error-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const keyFile = join(directory, "key");
+    const value = 'synthetic-token-quote"-backslash\\-end';
+    await writeFile(keyFile, value, { mode: 0o600 });
+    const helper = new URL("../helpers/dev-up-test-auth.mjs", import.meta.url).href;
+    const source = `
+    import test from 'node:test';
+    import { withDevUpModelKey, devUpTestError } from ${JSON.stringify(helper)};
+    test('intentional synthetic failure', withDevUpModelKey(${JSON.stringify(keyFile)}, async (_t, key) => {
+      const error = Object.assign(new Error('cleanup failed: ' + key + ' ' + JSON.stringify(key)), {
+        code: 'EACCES', signal: 'SIGTERM', cause: new Error(key), stdout: key, stderr: key, actual: key, expected: key,
+      });
+      const safe = devUpTestError(error);
+      process.stdout.write(JSON.stringify(safe) + '\\n');
+      throw error;
+    }));
+  `;
+    const child = spawn(process.execPath, ["--input-type=module", "-e", source], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    t.after(() => {
+      if (child.exitCode === null) {
+        child.kill("SIGKILL");
+      }
+    });
+    let output = "";
+    for (const stream of [child.stdout, child.stderr]) {
+      stream.on("data", (chunk) => {
+        output += chunk;
+      });
+    }
+    const code = await new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", resolve);
+    });
+    assert.equal(code, 1);
+    assert.ok(!output.includes(value));
+    assert.ok(!output.includes(JSON.stringify(value).slice(1, -1)));
+    assert.match(output, /cleanup failed/);
+    assert.match(output, /EACCES/);
+    assert.match(output, /SIGTERM/);
+    assert.ok(
+      !output.includes('"cause"') && !output.includes('"stdout"') && !output.includes('"actual"'),
+    );
+  },
+);
