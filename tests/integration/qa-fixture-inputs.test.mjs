@@ -568,3 +568,17 @@ test(
     );
   },
 );
+
+test("development proof omits diagnostic metadata that equals a registered credential", async () => {
+  const { devUpTestError } = await import("../helpers/dev-up-test-auth.mjs");
+  const { registerQaSecret } = await import("../helpers/qa-secrets.mjs");
+  for (const value of ["EACCES", "SIGTERM", "123"]) {
+    registerQaSecret(value);
+    const code = value === "123" ? 123 : value === "EACCES" ? "EACCES" : "EINVAL";
+    const safe = devUpTestError(
+      Object.assign(new Error("cleanup failed"), { code, signal: "SIGTERM" }),
+    );
+    assert.ok(!(JSON.stringify(safe) + safe.message + safe.stack).includes(value));
+    assert.match(safe.message, /cleanup failed/);
+  }
+});

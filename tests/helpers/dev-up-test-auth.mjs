@@ -1,18 +1,29 @@
 import assert from "node:assert/strict";
 import { isAbsolute } from "node:path";
 import { renderPresetTemplate } from "../../packages/contracts/src/preset-variables.mjs";
-import { protectedText, qaCommandFailureDetail, registerQaSecret } from "./qa-secrets.mjs";
+import {
+  protectedText,
+  qaCommandFailureDetail,
+  redactQaError,
+  registerQaSecret,
+} from "./qa-secrets.mjs";
 
 // Do not preserve raw causes, command output or assertion actual/expected fields.
 export function devUpTestError(error) {
   const detail = qaCommandFailureDetail(error?.message ?? "Development proof failed", {});
   const result = new Error(detail || "Development proof failed");
-  if (["ENOENT", "EACCES", "ELOOP", "EINVAL", "ETIMEDOUT"].includes(error?.code)) {
-    result.code = error.code;
-  } else if (Number.isInteger(error?.code) && error.code >= 0 && error.code <= 255) {
-    result.code = error.code;
+  const code = error?.code;
+  if (
+    (["ENOENT", "EACCES", "ELOOP", "EINVAL", "ETIMEDOUT"].includes(code) ||
+      (Number.isInteger(code) && code >= 0 && code <= 255)) &&
+    redactQaError(new Error(String(code))).message === String(code)
+  ) {
+    result.code = code;
   }
-  if (["SIGTERM", "SIGKILL", "SIGINT"].includes(error?.signal)) {
+  if (
+    ["SIGTERM", "SIGKILL", "SIGINT"].includes(error?.signal) &&
+    redactQaError(new Error(error.signal)).message === error.signal
+  ) {
     result.signal = error.signal;
   }
   return result;
