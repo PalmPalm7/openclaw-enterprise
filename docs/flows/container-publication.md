@@ -1,7 +1,7 @@
 ---
 created: 2026-09-21
-updated: 2026-10-08
-last_updated_session: authoring-run/74dc7eaf-a67b-47ef-91bd-2ecd0463fb10
+updated: 2026-10-11
+last_updated_session: authoring-run/2dd336a1-c8c4-4106-bcb8-0a9fb56c5295
 ---
 
 # Container publication flow
@@ -102,6 +102,12 @@ plugin's installation. Build tools remain in full Bookworm stages; final images
 use a separately pinned Node 24 Bookworm slim base. Both bases apply available
 Debian package updates when their recipe layers build. The Node digest identifies
 the upstream image; it does not freeze Debian package repositories.
+
+`deploy/runtime/Dockerfile:openclaw-dependency-inputs` copies the public Matrix
+download wrapper into the shared builder stage instead of bind-mounting it from
+the build context. Both installs retain the read-only `matrix-sdk-crypto` stage
+mount for the checksum-verified library. Neither the wrapper nor build secrets
+enter the final image.
 
 `deploy/runtime/Dockerfile:runtime` disables npm's background update notifier in
 the final image environment. Harness child processes inherit that default, so
@@ -239,9 +245,13 @@ owns package-write access and coordination.
 
 ## Changelog
 
+- 2026-10-11 00:27: Reconcile the Matrix helper COPY with the current runtime recipe; retain library and secret boundaries. (authoring-run/2dd336a1-c8c4-4106-bcb8-0a9fb56c5295 - aaf3f67e796754937f175132d40e8331346474b8)
+
 - 2026-10-10 03:00: Pin stock Codex 0.163.0-alpha.2; alpha.1 sent metadata the backend rejects. (fix-992-pin)
 
 - 2026-10-08 13:36: Pin the shared stock Codex dependency to 0.163.0-alpha.1 before frozen installation and record its dependency patch alongside the existing bridge patches. (authoring-run/74dc7eaf-a67b-47ef-91bd-2ecd0463fb10 - ae695e7f2b0c7bcd2416ed8146baeecb765ae233)
+
+- 2026-10-07 03:09: Copy the public Matrix download wrapper into the shared builder stage to preserve Podman builds on SELinux-enforcing hosts. (codex/01a11214-e11d-7172-b802-f8088e4e068a - e5e206c2a9de01601100c06581cc32f73a174456)
 
 - 2026-10-05 12:10: Update the OpenClaw pin, workspace templates, and Codex sandbox qualification to 0.160.0. (codex/01a0cf72-6985-7712-ba92-d8cc32470f24 - dd344a97)
 

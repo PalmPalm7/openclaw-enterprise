@@ -1,7 +1,7 @@
 ---
 created: 2026-09-09
-updated: 2026-10-09
-last_updated_session: authoring-run/c12130ba-3173-4831-86e9-5a209d16d630
+updated: 2026-10-11
+last_updated_session: authoring-run/2dd336a1-c8c4-4106-bcb8-0a9fb56c5295
 ---
 
 # Compose development startup
@@ -289,7 +289,13 @@ host directory and mounted read-only into the API and Kubernetes worker. Neither
 The lifecycle imports runtime and OpenShell images under engine-recorded names,
 including Podman `localhost/` tags and Docker Hub familiar names. `internal/occdev/kubernetes.go:engineImageReference` treats an omitted tag as
 `:latest` and rejects missing or ambiguous matches. `importDevelopmentImage` owns
-the subsequent import and in-cluster digest resolution. Before `writeInstallation`, `internal/occdev/up.go:Up` and
+the subsequent import and in-cluster digest resolution. Both Docker and Podman
+export the recorded image to an archive in owned state; Docker also selects the
+Linux platform with `image save --platform`. `internal/occdev/k3d_import.go:importArchiveDirect`
+uses `k3d image import --mode direct`, with bounded retries only for the known
+closed-stream race. Archive cleanup runs on success and failure; original tagged
+images remain. Containerd must report the imported digest before startup records
+an immutable reference. Before `writeInstallation`, `internal/occdev/up.go:Up` and
 `internal/occdev/openshell_k3d.go:upK3d` call
 `internal/occdev/status_proxy_k3d.go:developmentStatusProxySource`. Node inventory keeps caller context outside polling.
 
@@ -365,9 +371,15 @@ newly written external key if a later OpenShell readiness step fails.
 
 ## Changelog
 
+- 2026-10-11 00:27: Reconcile archive import documentation with the current Docker and Podman path; retain source tags and cleanup guarantees. (authoring-run/2dd336a1-c8c4-4106-bcb8-0a9fb56c5295 - aaf3f67e796754937f175132d40e8331346474b8)
+
 - 2026-10-09 22:35: Bind bootstrap authorization to startup cancellation (authoring-run/c12130ba-3173-4831-86e9-5a209d16d630 - 7f358117e68076912a6062411d363e920a0e6adb)
 
 - 2026-10-08 15:23: Reconciled current Docker preflight behavior with failed exclusive-output cleanup and clarified tool and image ownership. (authoring-run/0da79016-d6a4-4217-a420-1e8b0b314e14 - 3cffa93e76aedec4b2f35d14f9824b4531640449)
+
+- 2026-10-08 00:17: Merged bounded proxy queries with Podman archive import and current direct-stream retries; tightened the startup trace. (authoring-run/8ccd49ad-3c7a-4d26-8f41-5e3ad536ffe5 - a6bfbc985943bd79f49def459fdac13f18e06861)
+
+- 2026-10-07 04:08: Import tagged Podman development images through native export and direct archive streaming while retaining image identity and cleanup checks. (authoring-run/f32bed19-d6c1-45ed-bd7a-47b343a57b4b - d4173134f27d0961126b2df0f804ae90d1f3d7c0)
 
 - 2026-10-06 17:46: Remove newly created exclusive outputs after file-write failures. (authoring-run/e789ef10-ca82-4ee2-b31d-8d11100d9744 - 6508695f267e1441bf5a797b9710965f9b10990a)
 - 2026-10-05 16:01: Rejected interrupted Docker response streams in the request owner. (authoring-run/91705365-6496-4de8-943f-15c1ba105410 - 9b5a60467022d815d1259ff30d3ed64657657247)
