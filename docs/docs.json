@@ -1006,6 +1006,7 @@
               "testing/plugins",
               "testing/plugins-proof-notes",
               "testing/openshell",
+              "testing/openshell-coverage",
               "testing/openshell-first-agent",
               "testing/openshell-pre5-local-experiment",
               "flows/agent-repository-credentials",
