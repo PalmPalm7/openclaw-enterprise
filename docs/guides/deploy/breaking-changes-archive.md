@@ -8,6 +8,27 @@ newest first. Steps marked _untested_ have not been run against a real
 Installation. When this page nears the word limit, its oldest notices move to a
 new page named for the date they precede.
 
+## 2026-10-13: remote node CIDRs must be canonical
+
+**What breaks.** `helm upgrade` fails when a saved
+`gatewayRouting.remoteNodeCidrs` entry uses a leading zero, such as
+`010.0.0.1/32` or `::ffff:010.0.0.1/128`. Those values used to render, and the
+apiserver accepted them with a warning. The upgrade now stops before it writes
+that policy.
+
+**Who is affected.** Saved releases that use a leading-zero spelling. Canonical
+values still upgrade, including `10.0.0.1/32`, `0.0.0.0/0`, `::/64`, and
+`::ffff:10.0.0.0/120`. An empty list and `null` still omit the ingress block.
+
+**How to tell.** Helm stops with
+`gatewayRouting.remoteNodeCidrs requires an IPv4 or IPv6 CIDR` for
+`010.0.0.1/32`, and with
+`gatewayRouting.remoteNodeCidrs contains an invalid IPv6 address` for
+`::ffff:010.0.0.1/128`.
+
+**Steps.** Write the canonical value (`10.0.0.1/32` for `010.0.0.1/32`, and
+`::ffff:10.0.0.1/128` for `::ffff:010.0.0.1/128`) and upgrade again.
+
 ## 2026-10-13: execution API CIDRs must be explicit and nonzero
 
 **What breaks.** `helm upgrade` fails when a saved `executionCluster.apiCidrs`

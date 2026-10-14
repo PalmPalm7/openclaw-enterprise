@@ -121,6 +121,19 @@ DNS name its certificate covers, as the
 [`openai` source replacement notice](breaking-changes-archive.md#2026-10-13-openshell-openai-credential-sources-need-replacing)
 describes. _untested_ against a live Installation.
 
+## 2026-10-14: Codex model IPv4 hosts must be four decimal octets
+
+**What breaks.** `runtime.codexModelBaseUrl` whose IPv4 host is not four decimal
+octets with no leading zeros is refused.
+
+**Who is affected.** Kubernetes Compute settings that set
+`runtime.codexModelBaseUrl` to one of those spellings.
+
+**How to tell.** Compute reports `Codex model endpoint IPv4 host must be four
+decimal octets`.
+
+**Steps.** Write those four octets, then start again.
+
 ## 2026-10-13: image repository paths must be lowercase; no @ before URL hosts
 
 **What breaks.** Profile preflight refuses an uppercase letter in the repository
@@ -300,24 +313,3 @@ or the same sentence for `auth.google.egressCidrs`, `auth.oidc.egressCidrs`, and
 
 **Steps.** Write the canonical decimal (`140.82.112.8/20` for
 `140.82.112.08/20`) and upgrade again.
-
-## 2026-10-13: remote node CIDRs must be canonical
-
-**What breaks.** `helm upgrade` fails when a saved
-`gatewayRouting.remoteNodeCidrs` entry uses a leading zero, such as
-`010.0.0.1/32` or `::ffff:010.0.0.1/128`. Those values used to render, and the
-apiserver accepted them with a warning. The upgrade now stops before it writes
-that policy.
-
-**Who is affected.** Saved releases that use a leading-zero spelling. Canonical
-values still upgrade, including `10.0.0.1/32`, `0.0.0.0/0`, `::/64`, and
-`::ffff:10.0.0.0/120`. An empty list and `null` still omit the ingress block.
-
-**How to tell.** Helm stops with
-`gatewayRouting.remoteNodeCidrs requires an IPv4 or IPv6 CIDR` for
-`010.0.0.1/32`, and with
-`gatewayRouting.remoteNodeCidrs contains an invalid IPv6 address` for
-`::ffff:010.0.0.1/128`.
-
-**Steps.** Write the canonical value (`10.0.0.1/32` for `010.0.0.1/32`, and
-`::ffff:10.0.0.1/128` for `::ffff:010.0.0.1/128`) and upgrade again.

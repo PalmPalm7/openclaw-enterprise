@@ -1,3 +1,5 @@
+import { isIP } from "node:net";
+
 /**
  * Why a written endpoint is refused before it is parsed, or `undefined`. The URL parser drops
  * tabs and newlines, trims spaces and controls, treats the `//` after the scheme as optional,
@@ -76,4 +78,25 @@ export function normalizeOpenAiBaseUrl(value: string): string | undefined {
     return undefined;
   }
   return endpoint.origin + path;
+}
+
+const strictDecimalIpv4 = /^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$/;
+
+/** True when Node would store a different IPv4 address than the one written. */
+export function openAiBaseUrlRewritesIpv4(value: string): boolean {
+  if (openAiBaseUrlSpellingProblem(value) !== undefined) {
+    return false;
+  }
+  let endpoint: URL;
+  try {
+    endpoint = new URL(value);
+  } catch {
+    return false;
+  }
+  if (isIP(endpoint.hostname) !== 4) {
+    return false;
+  }
+  // A backslash is a slash to the URL parser, including the two separators after the scheme.
+  const written = /^https?:[/\\]{2}([^/?#:\\]+)/i.exec(value)?.[1];
+  return written !== endpoint.hostname || !strictDecimalIpv4.test(endpoint.hostname);
 }

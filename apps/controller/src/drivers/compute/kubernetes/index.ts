@@ -1,4 +1,8 @@
-import { normalizeOpenAiBaseUrl, openAiBaseUrlSpellingMessage } from "../../openai-endpoint.ts";
+import {
+  normalizeOpenAiBaseUrl,
+  openAiBaseUrlRewritesIpv4,
+  openAiBaseUrlSpellingMessage,
+} from "../../openai-endpoint.ts";
 import { compareResourceQuantities } from "./resource-quantities.ts";
 import {
   asRecord,
@@ -3169,11 +3173,14 @@ export class KubernetesComputeDriver implements ComputeDriver {
       }
       if (
         options.runtime.codexModelBaseUrl !== undefined &&
-        normalizeOpenAiBaseUrl(options.runtime.codexModelBaseUrl) === undefined
+        (normalizeOpenAiBaseUrl(options.runtime.codexModelBaseUrl) === undefined ||
+          openAiBaseUrlRewritesIpv4(options.runtime.codexModelBaseUrl))
       ) {
         throw new ConfigurationFailure(
           openAiBaseUrlSpellingMessage("Codex model endpoint", options.runtime.codexModelBaseUrl) ??
-            "Codex model endpoint requires HTTPS, a nonzero port, and a path ending in /v1 without credentials, wildcards, query, or fragment.",
+            (openAiBaseUrlRewritesIpv4(options.runtime.codexModelBaseUrl)
+              ? "Codex model endpoint IPv4 host must be four decimal octets from 0 to 255 with no leading zeros; other spellings parse as a different address."
+              : "Codex model endpoint requires HTTPS, a nonzero port, and a path ending in /v1 without credentials, wildcards, query, or fragment."),
         );
       }
       if (options.runtime.codexSeccompProfile !== undefined) {
@@ -11711,10 +11718,12 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     }
     if (openaiBaseUrl !== undefined) {
       const normalized = normalizeOpenAiBaseUrl(openaiBaseUrl);
-      if (normalized === undefined) {
+      if (normalized === undefined || openAiBaseUrlRewritesIpv4(openaiBaseUrl)) {
         throw new ConfigurationFailure(
           openAiBaseUrlSpellingMessage("Codex model endpoint", openaiBaseUrl) ??
-            "Codex model endpoint requires a valid HTTPS /v1 URL with a nonzero port and no hostname wildcards.",
+            (openAiBaseUrlRewritesIpv4(openaiBaseUrl)
+              ? "Codex model endpoint IPv4 host must be four decimal octets from 0 to 255 with no leading zeros; other spellings parse as a different address."
+              : "Codex model endpoint requires a valid HTTPS /v1 URL with a nonzero port and no hostname wildcards."),
         );
       }
       openaiBaseUrl = normalized;
