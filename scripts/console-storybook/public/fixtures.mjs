@@ -975,6 +975,9 @@ export function installFixture(scenario, evidence) {
         }
         const revision = snapshot(saved, nextId("rev"), 1);
         revisions.set(revision.id, revision);
+        if (scenario.provisionedDeploymentStopped) {
+          saved.desiredRuntimeState = "stopped";
+        }
         deployments.set(revision.id, {
           deploymentId: revision.id,
           namespaceId,
@@ -983,9 +986,14 @@ export function installFixture(scenario, evidence) {
           progress: initialDeploymentProgress(scenario.provisionedDeploymentStatus ?? "queued"),
           reads: scenario.provisionedDeploymentStatus === undefined ? 0 : undefined,
           error:
-            scenario.provisionedDeploymentStatus === "failed"
-              ? { code: "DEPENDENCY_UNAVAILABLE", message: "Deployment reconciliation failed." }
-              : null,
+            scenario.provisionedDeploymentStatus !== "failed"
+              ? null
+              : scenario.provisionedDeploymentStopped
+                ? {
+                    code: "REVISION_STOPPED",
+                    message: "Deployment ended because the Agent was stopped.",
+                  }
+                : { code: "DEPENDENCY_UNAVAILABLE", message: "Deployment reconciliation failed." },
           warnings: [],
         });
         provisioning.set(saved.id, {
@@ -1059,16 +1067,21 @@ export function installFixture(scenario, evidence) {
               url: current.url,
               ...(current.status === "failed"
                 ? {
-                    error: {
-                      code:
-                        scenario.provisionedDeploymentStatus === "failed"
-                          ? "HARNESS_CREDENTIAL_BOOTSTRAP_FAILED"
-                          : "PROVISIONING_FAILED",
-                      message:
-                        scenario.provisionedDeploymentStatus === "failed"
-                          ? "Harness credential initialization failed. Correct the cause and deploy again."
-                          : "The worker could not finish provisioning.",
-                    },
+                    error: scenario.provisionedDeploymentStopped
+                      ? {
+                          code: "REVISION_STOPPED",
+                          message: "The Agent was stopped before its first deployment finished.",
+                        }
+                      : {
+                          code:
+                            scenario.provisionedDeploymentStatus === "failed"
+                              ? "HARNESS_CREDENTIAL_BOOTSTRAP_FAILED"
+                              : "PROVISIONING_FAILED",
+                          message:
+                            scenario.provisionedDeploymentStatus === "failed"
+                              ? "Harness credential initialization failed. Correct the cause and deploy again."
+                              : "The worker could not finish provisioning.",
+                        },
                   }
                 : {}),
               ...(current.status === "succeeded" || current.reads > 1
