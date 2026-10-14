@@ -1,7 +1,7 @@
 ---
 created: "2026-09-21"
-updated: 2026-10-13
-last_updated_session: agent:roboclaw:dashboard:9d0532e1-befb-4fc3-935e-7cd2a0c72110
+updated: 2026-10-14
+last_updated_session: authoring-run/01a10a81-070c-7aa3-97d0-fbce8f285d4d
 ---
 
 # OpenShell Sandbox provisioning flow
@@ -268,18 +268,20 @@ For Codex, `GetService` must also return the unnamed bearer-passthrough endpoint
 on the admitted port. Workspace `sandbox:write` is the trust boundary because a
 holder can replace the Sandbox.
 
-The Backend shares one client per endpoint and retries failed setup. Unary calls
-check cancellation after setup and credential preparation, before dispatch.
-Setup cancellation waits for the pending step; it cannot bound stalled
-initialization or file reads. After dispatch, cancellation rejects the caller and
-cancels local gRPC, not necessarily the remote mutation. The lifecycle must
-recover uncertain effects.
+The Backend reuses endpoint clients and retries failed setup. Cancellation is
+checked after setup/credential preparation, so stalled initialization/file reads
+remain unbounded. After dispatch, cancellation stops local gRPC; remote mutations
+may continue and require recovery.
 
-`GetService` returns a normalized URL for local clients and the advertised
-hostname/port for workload transport. The Driver requires the unnamed
-bearer-passthrough exposure on the admitted app-server port; `harnessEndpoint`
-returns its WebSocket origin and provider-local `/sandbox/enterprise` workspace
+`GetService` returns the local client URL and advertised workload hostname/port.
+The unnamed bearer-passthrough exposure must match the admitted app-server port.
+`harnessEndpoint` returns its WebSocket origin and `/sandbox/enterprise` workspace
 root. Missing, malformed or changed exposure fails closed.
+
+`apps/controller/src/drivers/sandbox/openshell.ts:harnessStatus` probes the authenticated WebSocket handshake before
+reading a held-failure document. `apps/controller/src/drivers/sandbox/openshell-service-transport.ts:serviceWebSocketHandshake`
+destroys HTTP refusal responses immediately, so unfinished bodies cannot retain
+connections after the probe returns.
 
 The revision provider survives an uncertain create; revision cleanup deletes
 the Sandbox first.
@@ -357,6 +359,8 @@ networking. Native OpenClaw remains verification-only.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-14 20:27: Release refused WebSocket probes. (authoring-run/01a10a81-070c-7aa3-97d0-fbce8f285d4d - 4727e9b109a2127150e03e39e859d45e0668f82f)
 
 - 2026-10-13 14:11: Reconcile setup-Secret ordering and preserve service-IPv6 history alongside credential endpoint safeguards. (agent:roboclaw:dashboard:9d0532e1-befb-4fc3-935e-7cd2a0c72110 - 90268463bbd255c3c13a0e0bdeb437728189eb1a)
 
