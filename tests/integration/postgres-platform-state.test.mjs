@@ -1308,6 +1308,67 @@ test(
       });
       assert.equal(foreignNamespaceDecision.allowed, false);
     }
+
+    // Finding 1323 (bughunt-69): 64 revisions and 64 Presets of about 0.9 MB each. Full lists
+    // decoded every document (8-10 s on two CPUs); summaries read none into the API, and a
+    // summary page opens each row's snapshot once in the database for three top-level fields.
+    const large = JSON.stringify(
+      Object.fromEntries(Array.from({ length: 70_000 }, (_, i) => [`k${i}`, "v"])),
+    );
+    await pool.query(
+      `INSERT INTO occ.agent_revisions
+         (id, namespace_id, agent_id, revision_number, backend_id, admitted_spec, admitted_at)
+       SELECT 'rev_' || gen_random_uuid(), namespace_id, agent_id, 5000 + n, backend_id,
+              jsonb_set(admitted_spec, '{draft_spec,env}', jsonb_build_object('vars', $2::jsonb)),
+              admitted_at
+       FROM occ.agent_revisions, generate_series(1, 64) AS n WHERE id = $1`,
+      [fixture.revision.id, large],
+    );
+    await pool.query(
+      `INSERT INTO occ.presets (id, namespace_id, name, template, created_at)
+       SELECT 'pre_' || gen_random_uuid(), $1, 'Heavy preset ' || n,
+              jsonb_build_object('configuration',
+                jsonb_build_object('values', jsonb_build_object('env', $2::jsonb))),
+              clock_timestamp()
+       FROM generate_series(1, 64) AS n`,
+      [fixture.namespace.id, large],
+    );
+    const fastest = async (read) => {
+      let best = Infinity;
+      let result;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const started = performance.now();
+        result = await state.read(read);
+        best = Math.min(best, performance.now() - started);
+      }
+      return { result, ms: Math.round(best) };
+    };
+    const revisionPage = await fastest((view) =>
+      view.revisions.pageRevisionSummaries(fixture.namespace.id, fixture.agent.id, {
+        limit: 100,
+      }),
+    );
+    const heavyRevisions = revisionPage.result.revisions.filter(({ revision }) => revision > 5000);
+    assert.deepEqual(
+      heavyRevisions.slice(0, 2).map(({ revision }) => revision),
+      [5064, 5063],
+    );
+    assert.equal(heavyRevisions.length, 64);
+    assert.equal(heavyRevisions[0].harness.mode, fixture.revision.harness.mode);
+    const presetSummaries = await fastest((view) =>
+      view.presets.listPresetSummaries(fixture.namespace.id),
+    );
+    assert.ok(presetSummaries.result.length >= 64);
+    context.diagnostic(
+      `64 x 0.9 MB: revision summary page ${revisionPage.ms} ms, Preset summaries ${presetSummaries.ms} ms`,
+    );
+    assert.ok(revisionPage.ms < 1_000, `revision summary page took ${revisionPage.ms} ms`);
+    assert.ok(presetSummaries.ms < 1_000, `Preset summaries took ${presetSummaries.ms} ms`);
+    // Later starts in this database seed default Presets, which reads full templates.
+    await pool.query(
+      "DELETE FROM occ.presets WHERE namespace_id = $1 AND name LIKE 'Heavy preset %'",
+      [fixture.namespace.id],
+    );
   },
 );
 
@@ -1864,9 +1925,25 @@ test(
     assert.equal(detail.status, 200);
     assert.deepEqual(detail.data, degradedAgent);
 
+    // The list carries summaries, newest first. It never decodes a snapshot, so the
+    // unreadable revision lists like any other; its exact read reports the error.
+    const revisionSummary = (item) => ({
+      id: item.id,
+      namespaceId: item.namespaceId,
+      agentId: item.agentId,
+      revision: item.revision,
+      backendId: item.backendId,
+      configurationId: item.configurationId,
+      configurationGeneration: item.configurationGeneration,
+      harness: item.harness,
+      createdAt: item.createdAt,
+    });
     const revisions = await request(api, "GET", revisionPath);
     assert.equal(revisions.status, 200);
-    assert.deepEqual(revisions.data, [healthyRevision.data, degradedRevision]);
+    assert.deepEqual(revisions.data, [
+      revisionSummary({ ...healthyRevision.data, id: malformedRevisionId, revision: 2 }),
+      revisionSummary(healthyRevision.data),
+    ]);
     const validDetail = await request(api, "GET", `${revisionPath}/${revision.id}`);
     assert.equal(validDetail.status, 200);
     assert.deepEqual(validDetail.data, healthyRevision.data);
@@ -1911,16 +1988,19 @@ test(
         ["agent", "revisions", agent.id],
       ]) {
         const table = await execute(cli, [...cliArguments, ...command]);
-        assert.match(table.stdout, /CONFIGURATION ERROR/u);
-        assert.match(table.stdout, /SAVED_CONFIGURATION_UNREADABLE \(plugins\)/u);
         const structured = await execute(cli, [...cliArguments, ...command, "--output", "json"]);
         const decoded = JSON.parse(structured.stdout);
         const records = Array.isArray(decoded) ? decoded : [decoded];
-        assert.ok(records.some((record) => record.configurationReadError?.code === readError.code));
         if (command[1] === "revisions") {
+          // Revision summaries carry no saved settings, so no read error either.
+          assert.ok(table.stdout.includes(malformedRevisionId));
           assert.match(structured.stderr, /Agent saved configuration is unreadable/u);
           assert.ok(records.every((record) => record.deploymentStatus === null));
+          continue;
         }
+        assert.match(table.stdout, /CONFIGURATION ERROR/u);
+        assert.match(table.stdout, /SAVED_CONFIGURATION_UNREADABLE \(plugins\)/u);
+        assert.ok(records.some((record) => record.configurationReadError?.code === readError.code));
       }
       // A readable Agent can still have an unreadable historical snapshot. Keep
       // its healthy sibling and do not enrich the error variant through strict reads.
@@ -1929,7 +2009,10 @@ test(
         JSON.stringify(agent.plugins ?? {}),
       ]);
       const history = await execute(cli, [...cliArguments, "agent", "revisions", agent.id]);
-      assert.match(history.stdout, /SAVED_CONFIGURATION_UNREADABLE \(plugins\)/u);
+      assert.match(
+        history.stderr,
+        new RegExp(`deployment status of revision ${malformedRevisionId} is unavailable`, "u"),
+      );
       assert.ok(history.stdout.includes(revision.id));
       assert.match(history.stdout, /queued/u);
       assert.ok(history.stdout.includes(malformedRevisionId));
@@ -1987,7 +2070,7 @@ test(
         malformedRevisionId,
         revisionPath,
         `${revisionPath}/${malformedRevisionId}`,
-        [healthyRevision.data],
+        [revisionSummary(healthyRevision.data)],
       ],
       ["agent", agent.id, `/namespaces/${namespaceId}/agents`, agentPath, [healthyAgent]],
     ]) {

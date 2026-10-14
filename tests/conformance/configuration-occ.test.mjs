@@ -1012,7 +1012,10 @@ test("deployment names a non-object agents setting before model policy", async (
     ),
     refusal,
   );
-  assert.deepEqual(await controller.listRevisions(administrator, namespace.id, agent.id), []);
+  assert.deepEqual(
+    (await controller.listRevisions(administrator, namespace.id, agent.id)).revisions,
+    [],
+  );
 });
 
 test("one installation admits embedded and dedicated revisions without rewriting historical placement", async () => {
@@ -1434,7 +1437,7 @@ test("OCC rejects alternate selectable runtimes and unsupported Codex providers 
       name,
     );
     assert.deepEqual(
-      await controller.listRevisions(administrator, namespace.id, agent.id),
+      (await controller.listRevisions(administrator, namespace.id, agent.id)).revisions,
       [],
       name,
     );
@@ -1517,7 +1520,10 @@ test("Harness admission rejects conflicting selections, mode mismatches, and una
     agentId: agent.id,
     configurationId: openclawConfiguration.id,
   });
-  assert.deepEqual(await controller.listRevisions(administrator, namespace.id, agent.id), []);
+  assert.deepEqual(
+    (await controller.listRevisions(administrator, namespace.id, agent.id)).revisions,
+    [],
+  );
   const embedded = await controller.deployAgent(
     administrator,
     { namespaceId: namespace.id, agentId: agent.id },
@@ -1547,9 +1553,23 @@ test("Harness admission rejects conflicting selections, mode mismatches, and una
       ),
   );
   assert.equal((await controller.getInstallation(administrator)).capabilities, undefined);
-  assert.deepEqual(await controller.listRevisions(administrator, namespace.id, agent.id), [
-    embedded,
-  ]);
+  // Listing returns the revision's summary: no saved settings.
+  assert.deepEqual(
+    (await controller.listRevisions(administrator, namespace.id, agent.id)).revisions,
+    [
+      {
+        id: embedded.id,
+        namespaceId: embedded.namespaceId,
+        agentId: embedded.agentId,
+        revision: embedded.revision,
+        backendId: embedded.backendId,
+        configurationId: embedded.configurationId,
+        configurationGeneration: embedded.configurationGeneration,
+        harness: embedded.harness,
+        createdAt: embedded.createdAt,
+      },
+    ],
+  );
 
   assert.throws(
     () =>
@@ -1608,7 +1628,10 @@ test("Installation native worker support admits dedicated OpenClaw to Sandbox ch
         error.message,
       ),
   );
-  assert.deepEqual(await controller.listRevisions(administrator, namespace.id, agent.id), []);
+  assert.deepEqual(
+    (await controller.listRevisions(administrator, namespace.id, agent.id)).revisions,
+    [],
+  );
   assert.throws(
     () => new OpenClawController(installation, { nativeWorkerSupport: "pinned-runtime" }),
     ScopeViolationError,
@@ -1634,7 +1657,10 @@ test("Agent deployment separately authorizes its exact Configuration", async () 
       return true;
     },
   );
-  assert.deepEqual(await controller.listRevisions(administrator, namespace.id, agent.id), []);
+  assert.deepEqual(
+    (await controller.listRevisions(administrator, namespace.id, agent.id)).revisions,
+    [],
+  );
 });
 
 test("Agent creation and update separately authorize their exact Configuration", async () => {
