@@ -618,9 +618,17 @@ test("ChatGPT Backend releases rejected HTTPS responses for subsequent account c
       length: 4 * 1024 * 1024 + 1,
       reason: /invalid response/,
     },
+    {
+      name: "oversized chunked response",
+      status: 200,
+      stream: true,
+      reason: /invalid response/,
+    },
   ]) {
     await t.test(fault.name, async () => {
       const requests = [];
+      let streamTimer;
+      let streamedBytes = 0;
       const server = createServer({ key, cert }, (request, response) => {
         requests.push({ method: request.method, path: request.url });
         request.resume();
@@ -629,8 +637,17 @@ test("ChatGPT Backend releases rejected HTTPS responses for subsequent account c
             response.setHeader("content-length", fault.length);
           }
           response.writeHead(fault.status);
-          // The native response stays open after the Backend rejects its headers.
-          response.write("unfinished synthetic response");
+          if (fault.stream) {
+            const chunk = Buffer.alloc(64 * 1024, 0x20);
+            streamTimer = setInterval(() => {
+              response.write(chunk);
+              streamedBytes += chunk.length;
+            }, 2);
+            response.once("close", () => clearInterval(streamTimer));
+          } else {
+            // The native response stays open after the Backend rejects its headers.
+            response.write("unfinished synthetic response");
+          }
         } else {
           response.setHeader("content-type", "application/json");
           response.end(
@@ -683,8 +700,13 @@ test("ChatGPT Backend releases rejected HTTPS responses for subsequent account c
             path: `/v1/manage/workspaces/${workspaceId}/service-accounts`,
           }),
         );
+        if (fault.stream) {
+          assert.ok(streamedBytes > 4 * 1024 * 1024, String(streamedBytes));
+          assert.ok(streamedBytes < 6 * 1024 * 1024, String(streamedBytes));
+        }
       } finally {
         clearTimeout(timer);
+        clearInterval(streamTimer);
         setGlobalDispatcher(originalDispatcher);
         await agent.destroy();
         await retry?.catch(() => {});
