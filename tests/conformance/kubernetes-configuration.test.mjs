@@ -992,16 +992,21 @@ test("Kubernetes Configuration stores a document up to one byte under 1 MiB of U
   assert.equal(JSON.stringify(wide).length < limit, true);
 
   await assert.doesNotReject(driver.validate({ ...configuration, values: largest }));
+  await assert.doesNotReject(driver.validateSize(largest));
   const stored = { ...configuration, values: largest };
   assert.deepEqual(
     await driver.checkedConfiguration(driver.manifest(stored, "tenant"), configuration, "tenant"),
     stored,
   );
   for (const values of [atLimit, wide]) {
-    await assert.rejects(
-      driver.validate({ ...configuration, values }),
-      /exceeds the Kubernetes ConfigMap size limit/,
-    );
+    await assert.rejects(driver.validate({ ...configuration, values }), {
+      name: "ConfigurationSizeError",
+      limitBytes: limit,
+    });
+    await assert.rejects(driver.validateSize(values), {
+      name: "ConfigurationSizeError",
+      limitBytes: limit,
+    });
     await assert.rejects(
       driver.checkedConfiguration(
         driver.manifest({ ...configuration, values }, "tenant"),
