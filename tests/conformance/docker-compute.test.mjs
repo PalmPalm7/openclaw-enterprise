@@ -79,6 +79,66 @@ try {
   });
 });
 
+test("Docker Compute rejects an unbounded API response before its request deadline", async () => {
+  const source = String.raw`
+import assert from "node:assert/strict";
+import http from "node:http";
+import { syncBuiltinESMExports } from "node:module";
+let interval;
+let versionRequests = 0;
+let streamedBytes = 0;
+const server = http.createServer((request, response) => {
+  if (request.url === "/_ping") {
+    response.end("OK");
+    return;
+  }
+  assert.equal(request.url, "/version");
+  versionRequests += 1;
+  if (versionRequests === 1) {
+    response.writeHead(200, {
+      "content-type": "application/json",
+      "content-length": String(4 * 1024 * 1024 + 1),
+    });
+    response.flushHeaders();
+    return;
+  }
+  response.writeHead(200, { "content-type": "application/json" });
+  const chunk = Buffer.alloc(64 * 1024, 0x20);
+  interval = setInterval(() => {
+    response.write(chunk);
+    streamedBytes += chunk.length;
+  }, 5);
+});
+await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+const nativeRequest = http.request;
+http.request = (options, callback) =>
+  nativeRequest({ ...options, socketPath: undefined, host: "127.0.0.1", port: server.address().port }, callback);
+syncBuiltinESMExports();
+try {
+  const { DockerComputeDriver } = await import(process.argv[1]);
+  const driver = new DockerComputeDriver({ images: { gateway: "fixture:local", agent: "fixture:local" } });
+  await assert.rejects(driver.preflight(), { message: "Docker API response is too large." });
+  assert.equal(streamedBytes, 0);
+  await assert.rejects(driver.preflight(), { message: "Docker API response is too large." });
+  assert.ok(streamedBytes > 4 * 1024 * 1024, String(streamedBytes));
+  assert.ok(streamedBytes < 6 * 1024 * 1024, String(streamedBytes));
+} finally {
+  clearInterval(interval);
+  http.request = nativeRequest;
+  syncBuiltinESMExports();
+  server.closeAllConnections();
+  await new Promise((resolve) => server.close(resolve));
+}
+`;
+  const driver = new URL(
+    "../../apps/controller/src/drivers/compute/docker/index.ts",
+    import.meta.url,
+  );
+  await promisify(execFile)(process.execPath, ["--input-type=module", "-e", source, driver.href], {
+    timeout: 10_000,
+  });
+});
+
 test("Docker Agent readiness handles interrupted status responses immediately", async () => {
   // Execute the exact generated container healthcheck against a real loopback peer that
   // sends headers and a partial body before resetting the response stream.
