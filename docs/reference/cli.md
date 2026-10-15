@@ -134,10 +134,14 @@ claimed.
 
 `occ agent runtime AGENT_ID` and `occ agent logs AGENT_ID` read the
 [Agent logs](../guides/topics/agent-logs.md) routes. Without `--revision ID`,
-both read the latest revision when it is newer than the active one and has Pods
-(a deploy in progress or a failed replacement, whose Pods hold the failure),
-else the active revision, else the latest revision. They print the revision they
-read to stderr; a reader without Agent `operate` cannot check for Pods, so the
+both read the latest revision when it differs from the active one and has Pods
+or concrete provider Harness status (`running`, `starting`, or `lost`), including
+a failed replacement with no revision Pods yet. An `unknown` Harness status
+alone is not runtime evidence. Podless Harness selection also requires a higher
+revision number than the exact active revision; unreadable or invalid active
+metadata retains the active revision. Otherwise they read the active revision, else
+the latest revision. They print the revision they
+read to stderr; a reader without Agent `operate` cannot probe runtime status, so the
 notice names the newer revision to pass. `runtime` accepts `-o table|json|yaml`
 and needs Agent `operate` and `read` plus `read` on the revision. Its table output
 ends with each Pod's Events (`POD`, `CONTAINER`, `TYPE`, `REASON`, `COUNT`,
