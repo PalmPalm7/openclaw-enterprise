@@ -8695,8 +8695,9 @@ export class OpenClawController {
     return found;
   }
 
+  /** Callers hold the Namespace lock. */
   private async guardAgentProvisioning(
-    state: PlatformReadView,
+    state: PlatformUnitOfWork,
     namespaceId: string,
     agentId: string,
     handoff = false,
@@ -8713,13 +8714,61 @@ export class OpenClawController {
       record.status === "queued" ||
       record.status === "running" ||
       this.provisioningBefore(record, "configuration") ||
-      (record.status === "failed" && record.revisionId === undefined) ||
-      (record.status === "cancelled" && this.provisioningHasUnresolvedEffect(record))
+      (record.status === "failed" && record.revisionId === undefined)
     ) {
       throw new ResourceStateConflictError(
         "The Agent is reserved for provisioning. Stop or delete it, or retry its failed provisioning request.",
       );
     }
+    if (record.status === "cancelled" && this.provisioningHasUnresolvedEffect(record)) {
+      await this.settleAbandonedProvisioningEffect(state, namespaceId, agentId);
+    }
+  }
+
+  /**
+   * A cancelled job never runs again, so nothing else settles the runtime-credential write it
+   * left pending, and without this its stopped Agent could only be deleted (finding 1384). Once
+   * the claim that began the write has lapsed (at once if no worker held it when Stop cancelled
+   * the job), its worker has stopped issuing requests, so this settles it under the Namespace and
+   * Agent locks, as Agent deletion does. A request already sent may still land; that is safe
+   * because the write creates only absent Secrets, and deploy admission checks the runtime
+   * credentials and creates missing ones. Inside the lease the Agent stays reserved; with
+   * conflicting or malformed evidence it can only be deleted.
+   */
+  private async settleAbandonedProvisioningEffect(
+    state: PlatformUnitOfWork,
+    namespaceId: string,
+    agentId: string,
+  ): Promise<void> {
+    const agent = await state.agents.lockAgent(namespaceId, agentId);
+    if (agent?.status !== "active") {
+      throw new AgentDeletingError();
+    }
+    const current =
+      (await state.provisioning.settleAbandonedEffect(namespaceId, agentId)) ??
+      (await state.provisioning.findByAgent(namespaceId, agentId));
+    if (
+      current === undefined ||
+      current.revisionId !== undefined ||
+      !this.provisioningHasUnresolvedEffect(current)
+    ) {
+      return;
+    }
+    const pending = provisioningPendingEffect(current);
+    // Only a well-formed write still inside its cancelled claim's lease settles by waiting.
+    if (
+      pending?.kind === "transport" &&
+      pending.ownerPresent &&
+      current.progress.effectReceipt === undefined &&
+      current.progress.cancelledClaimExpiresAt !== undefined
+    ) {
+      throw new ResourceStateConflictError(
+        "The Agent's cancelled provisioning may still be writing its runtime credentials. Try again in a few seconds, or delete the Agent.",
+      );
+    }
+    throw new ResourceStateConflictError(
+      "The Agent's cancelled provisioning left a runtime-credential write that cannot be settled. Delete the Agent.",
+    );
   }
 
   private async guardProvisioningConfiguration(
