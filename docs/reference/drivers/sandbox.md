@@ -126,7 +126,8 @@ their Compute contract.
    cleanup. If Sandbox owns it, the method removes it.
 5. Namespace deletion calls `cleanup` without a revision after revision cleanup
    and before Compute releases the Namespace. A failure prevents Compute from
-   deleting the Namespace so provider cleanup can be retried safely.
+   deleting the Namespace so provider cleanup can be retried safely, unless it
+   is a refusal of the controller's identity (below).
 
 Namespace setup, provisioning, and cleanup must be safe to repeat. Failed
 revision cleanup remains retryable. Unsupported topology, missing prerequisites,
@@ -140,6 +141,14 @@ code. The worker then fails the deployment with that code and a fixed message
 at once. The driver's own message stays in the controller:
 `SANDBOX_SECRET_ENVIRONMENT_UNSUPPORTED` (Secret-backed environment) and
 `SANDBOX_HARNESS_UNSUPPORTED` (unsupported Harness).
+
+When the provider refuses the controller's own identity during `ensureNamespace`
+or Namespace `cleanup`, a retry cannot help until an operator fixes that identity.
+The driver throws `SandboxNamespaceRefusedError` from `@openclaw-enterprise/occ`,
+whose message names only the provider's refusal code. Compute fails the Namespace
+step as `permanent` at once; for `ensureNamespace` the worker logs that message
+as the `reason`. OpenShell throws it for gRPC `PERMISSION_DENIED` and
+`UNAUTHENTICATED`.
 
 ## Limits
 
