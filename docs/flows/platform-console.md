@@ -1,7 +1,7 @@
 ---
 created: 2026-09-01
-updated: 2026-10-09
-last_updated_session: authoring-run/2e195d67-c77d-43d0-8c32-2179523eb3a2
+updated: 2026-10-15
+last_updated_session: authoring-run/05ac6c84-8444-4dc1-8311-13c4e84369a3
 ---
 
 # Platform console request flow
@@ -38,6 +38,9 @@ graph TD
     B --> B1["Recheck session and Namespace access"]
     B1 -->|no session| C["Login"]
     C -->|GitHub| C1["Start GitHub sign-in"]
+    B1 -->|authenticated recovery key| NR["Resolve authorized Agent key"]
+    NR -->|allowed| D
+    NR -->|unavailable| D
     C1 -->|callback redirect| B1
     B1 -->|authenticated| D["Read readable Namespaces and validate selection"]
     D -->|debug=true| DBG["Read accessible Agents and runtime image metadata"]
@@ -140,23 +143,8 @@ catalog and diagnostic POSTs do not.
 
 A changed user or session key clears retained views and drafts before further
 private reads. Missing sessions open login; failed reads offer Retry.
-`showLogin` reads `GET /api/auth/providers`; true `github`/`google` flags add their **Continue
-with** buttons, and discovery failure keeps password login. A true `oidc` flag adds a button
-labelled from `oidcSignIn.label` only when `oidcSignIn.authorizationUrl` is `https:`; its start
-URL must use that endpoint's origin and path, as GitHub's and Google's must use their fixed ones. `password: false`
-(recovery-only) hides the form behind **Recovery sign-in** and changes the
-provider-error advice from "use your password" to asking an administrator. Pending login disables
-all; generations reject late redirects. With `sessionBinding`, `loadPage`
-exchanges the button's stored `attemptId` once for its key. Tabs then send
-their pinned `x-occ-session-key`, so a replaced cookie yields login.
-`authError=<provider>` shows a generic, one-time error; with `authError=github`, an
-`authReason` of `membership` or `membership-unavailable` explains a GitHub
-[allowlist](../reference/authentication/external-sign-in.md#organization-and-team-allowlist)
-refusal instead. With any provider, `account-disabled` says the account is disabled and to ask
-an administrator to enable it; `provider-unavailable` and `unavailable` say to try again
-later. The
-[authentication flow](local-password-authentication.md#3-construct-session-authentication)
-owns the server side.
+The [console sign-in flow](platform-console/sign-in-return.md) covers provider
+discovery, one-use session binding, and requested destination recovery.
 
 `apps/controller/src/auth/index.ts:requireTrustedBrowserOrigin` checks Origin
 before sign-in/out, even for SDK calls bypassing Better Auth middleware; headerless
@@ -375,6 +363,7 @@ refresh and inspection.
 
 - 2026-10-15 20:00: Hold pages until returns revalidate. (public-pr/2523)
 - 2026-10-15 19:40: Compress static console scripts and styles per `Accept-Encoding`. (console-gzip)
+- 2026-10-15 19:03: Preserve scoped destinations across sign-in and resolve Agent recovery after session admission. (authoring-run/05ac6c84-8444-4dc1-8311-13c4e84369a3 - 91ac04d6919860b7d7386444468a3dc0ddc90481)
 - 2026-10-13 12:00: Explain outage sign-in reasons. (kc-guide-fix)
 - 2026-10-09 21:10: Preserve cancellation, deadline and transport failures during response body reads (authoring-run/2e195d67-c77d-43d0-8c32-2179523eb3a2 - 013bcf5f76819ca280a164745d470855fc5b74cd)
 
