@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
-updated: 2026-10-13
-last_updated_session: authoring-run/adccd418-cf61-4fbb-b3ba-0fcad194d907
+updated: 2026-10-15
+last_updated_session: authoring-run/613fa018-dc4e-4c4d-b05b-f2f8f79e3244
 ---
 
 # Agent runtime logs flow
@@ -189,27 +189,26 @@ names its audit event, and any denial, `openclaw.agents.runtime_logs.download`.
 
 ### 4. Return
 
-`apps/controller/src/http/runtime-logs.ts:runtimeLogPageBody` accepts only
-sanitized records and fails on the reserved `content` class.
-`runtimeLogDownloadBody` serializes the same branded records as text lines with
-the same check, and `runtimeLogDownloadFileName` names the attachment
-`<agent>-<revision>-<source>-<pod>.log`. A `minLevel` query
-(`runtime-logs/read.ts:runtimeLogPageAtLevel`) removes sanitized lines below that
-level after the cursor is signed, so polls resume after hidden lines; unknown-level
-lines, gaps and withheld counts stay. The console asks for `minLevel=info` unless
-**Include debug** is selected; its level chips and text filter
-(`apps/controller/src/console/agents/logs.mjs`) run only over loaded rows. The
-console caches a `403` per operator page session, so reopening adds no audited
-denial. Its status
-names log-text grants. Pod cards show every actual container's state and exit;
-the Pod/container picker selects its exact stream. Gateway views point to the Harness source while no Harness
-Pod is ready, or Deployment activity while none exists. The CLI rejects explicit
-zero or positive sub-second `--since` before revision selection or API client
-setup; omission keeps the unfiltered default. Its `--follow` loop re-sends the
-cursor every 2 seconds.
-`runAgentLogs` ends a follow cleanly on cancellation; without `--follow`, it is an
-error. Driver errors map to
-fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
+`apps/controller/src/http/runtime-logs.ts:runtimeLogPageBody` rejects reserved
+`content` records. `runtimeLogDownloadBody` checks the same branded records;
+`runtimeLogDownloadFileName` names `<agent>-<revision>-<source>-<pod>.log`.
+`runtime-logs/read.ts:runtimeLogPageAtLevel` filters sanitized lines after cursor
+signing: polls pass hidden lines; unknown-level lines, gaps and withheld counts stay.
+The console defaults to `minLevel=info` unless **Include debug** is selected.
+Its level/text filters (`apps/controller/src/console/agents/logs.mjs`) use loaded
+rows. Cached `403` responses avoid repeated audited denials; status names log-text
+grants. Pod cards report each container's state/exit; the picker selects its
+stream. Gateway views link Harness output before readiness, or Deployment activity
+when no Harness Pod exists.
+The CLI rejects zero/sub-second `--since` before client/revision setup; omission
+keeps unfiltered reads. `runAgentLogs --follow` polls cursors every two seconds
+and exits cleanly on cancellation; cancellation without follow is an error.
+`internal/occclient/transport.go:apiError` accepts `Retry-After` seconds or HTTP
+dates. Positive delays up to one hour postpone a `429` follow retry, with date
+delays rounded up to seconds. Invalid, expired or unsupported delays retain the
+normal interval. Error messages round fractional seconds up. This response-consumption step neither retries
+other failure classes nor changes server admission. Driver failures use fixed
+`RUNTIME_LOGS_*` codes; requests have a ten-second deadline.
 
 ## Debugging and Verification
 
@@ -235,6 +234,8 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-15 09:25: Honor HTTP-date Retry-After in CLI follow. (authoring-run/613fa018-dc4e-4c4d-b05b-f2f8f79e3244 - 422cb3fe407204d4add49ea8494f0fd0ce49be52)
 
 - 2026-10-13: Key cursor hashes; `v1` cursors expire. (#2274)
 
