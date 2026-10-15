@@ -482,7 +482,7 @@ function retainMountedView() {
   mountedRouteKey = null;
 }
 
-function restoreRetainedView(current) {
+function takeRetainedView(current) {
   const owner = sessionOwnerKey(session);
   const key = routeKey(current);
   const retained = key && retainedViews.get(key);
@@ -490,36 +490,61 @@ function restoreRetainedView(current) {
     return null;
   }
   retainedViews.delete(key);
+  return retained;
+}
+
+// On a return, keeps the page already on screen, inert, in a fresh pending shell while the
+// retained route's admission and reads run. A retained view is then never painted before it revalidates
+// (finding 1412), and returns do not flash a loading state (finding 1415). Returns null when
+// no page is shown.
+function holdShownView(current) {
+  const view = app.querySelector('.content [aria-live="polite"]');
+  if (!view) {
+    return null;
+  }
+  const title = app.querySelector(".content h1")?.textContent;
+  const scope = app.querySelector(".content .scope")?.textContent;
+  const diagnostics = app.querySelector(".runtime-debug");
+  const scrollY = window.scrollY;
   const shell = renderShell(current.feature, true);
+  if (title) {
+    app.querySelector(".content h1").textContent = title;
+  }
+  if (scope) {
+    app.querySelector(".content .scope").textContent = scope;
+  }
+  view.inert = true;
+  view.setAttribute("aria-busy", "true");
+  shell.view.replaceWith(view);
+  shell.view = view;
+  if (shell.diagnostics && diagnostics) {
+    diagnostics.inert = true;
+    shell.diagnostics.replaceWith(diagnostics);
+    shell.diagnostics = diagnostics;
+  }
+  window.scrollTo({ top: scrollY, left: 0 });
+  return shell;
+}
+
+// Mounts a retained view that revalidated unchanged, active at once.
+function mountRetainedView(current, retained) {
+  const shell = renderShell(current.feature, false);
   if (retained.title) {
     app.querySelector(".content h1").textContent = retained.title;
   }
   if (retained.scope) {
     app.querySelector(".content .scope").textContent = retained.scope;
   }
+  retained.snapshot.inert = false;
   shell.view.replaceWith(retained.snapshot);
   shell.view = retained.snapshot;
-  shell.retained = retained;
   if (shell.diagnostics && retained.state?.diagnostics) {
+    retained.state.diagnostics.inert = false;
     shell.diagnostics.replaceWith(retained.state.diagnostics);
     shell.diagnostics = retained.state.diagnostics;
-    shell.diagnostics.inert = true;
   }
-  shell.view.setAttribute("aria-busy", "true");
-  shell.view.setAttribute("inert", "");
-  shell.blockedControls = [
-    ...shell.view.querySelectorAll("button, input, select, textarea"),
-  ].filter((control) => !control.disabled);
-  for (const control of shell.blockedControls) {
-    control.disabled = true;
-  }
-  mountedRouteKey = key;
-  const active = lifetime.capture();
-  requestAnimationFrame(() => {
-    if (lifetime.isCurrent(active) && mountedRouteKey === key) {
-      window.scrollTo({ top: retained.scrollY, left: 0 });
-    }
-  });
+  mountedRouteKey = routeKey(current);
+  window.scrollTo({ top: retained.scrollY, left: 0 });
   return shell;
 }
 
@@ -822,9 +847,12 @@ async function loadPage({ fromNavigation = false, reuseView = fromNavigation } =
     retainedViews.delete(previousMountedRouteKey);
     discardCreationOnExit = null;
   }
-  let shell = knownPrivateState ? restoreRetainedView(current) : null;
-  let retained = shell !== null;
-  if (!retained) {
+  const retainedView = knownPrivateState ? takeRetainedView(current) : null;
+  let retained = retainedView !== null;
+  // A return keeps the shown page until the retained view revalidates; other loads show loading.
+  let shell = retained ? holdShownView(current) : null;
+  let held = shell !== null;
+  if (!held) {
     publicPanel("Loading…", "Checking your session.");
   }
   if (!Object.hasOwn(pages, current.feature) && current.feature !== "login") {
@@ -833,7 +861,7 @@ async function loadPage({ fromNavigation = false, reuseView = fromNavigation } =
     );
     return;
   }
-  if (current.feature !== "login" && !retained) {
+  if (current.feature !== "login" && !held) {
     shell = renderShell(current.feature, true);
     panel(shell.view, "Loading…", "Checking your session and Namespace access.");
   }
@@ -920,8 +948,10 @@ async function loadPage({ fromNavigation = false, reuseView = fromNavigation } =
       observabilityOwner = null;
       installationAdmin = null;
       draftUserId = owner;
-      if (retained) {
-        retained = false;
+      retained = false;
+      if (held) {
+        // Another account's page must not stay on screen.
+        held = false;
         shell = null;
         publicPanel("Loading…", "Checking your session.");
       }
@@ -975,10 +1005,11 @@ async function loadPage({ fromNavigation = false, reuseView = fromNavigation } =
     const agentsNamespaceUnavailable =
       current.feature === "agents" && !namespaces.some((item) => item.id === namespaceId);
     if (retained && current.namespace !== null) {
-      // Namespace admission is done, so the header selector is usable while the retained
-      // view revalidates, as on first loads. A switch resets the lifetime, discarding these reads.
-      // Without a URL selection the shell has none; the full render below picks the default.
-      shellUI.updateNamespaces(namespaces);
+      // Namespace admission is done, so the header selector is usable while the destination's
+      // reads run, as on first loads. A switch resets the lifetime, discarding these reads.
+      // Without a URL selection the full render below picks the default. A held page keeps
+      // the scope beside its rows until the destination replaces them.
+      shellUI.updateNamespaces(namespaces, { preservePageScope: held });
     }
     let retainedItems = null;
     let retainedAgent = null;
@@ -1006,7 +1037,7 @@ async function loadPage({ fromNavigation = false, reuseView = fromNavigation } =
         return;
       }
     }
-    const retainedState = shell?.retained?.state;
+    const retainedState = retainedView?.state;
     if (retained && reuseView && retainedState && !agentsNamespaceUnavailable) {
       const fresh = new Map([["/namespaces", namespaces]]);
       if (retainedAgent) {
@@ -1046,6 +1077,7 @@ async function loadPage({ fromNavigation = false, reuseView = fromNavigation } =
             readSignature(fresh.get(path), retainedState.metaReads.has(path)) === value,
         );
       if (unchanged) {
+        shell = mountRetainedView(current, retainedView);
         mountedViewState = retainedState;
         retainedState.active = active;
         retainedState.resumeDrafts?.();
@@ -1055,14 +1087,6 @@ async function loadPage({ fromNavigation = false, reuseView = fromNavigation } =
         }
         navigateAgentTab = retainedState.tabNavigation;
         mountedAgent = retainedState.agent;
-        for (const control of shell.blockedControls) {
-          control.disabled = false;
-        }
-        shell.view.removeAttribute("inert");
-        if (shell.diagnostics) {
-          shell.diagnostics.inert = false;
-        }
-        shellUI.updateNamespaces(namespaces);
         markMountedRoute(current);
         return;
       }
@@ -1260,6 +1284,7 @@ async function loadPage({ fromNavigation = false, reuseView = fromNavigation } =
       clearDrafts();
       resetReads();
       clearPrivate();
+      shell = null;
       publicPanel(
         sessionResolved ? "Namespace access unavailable" : "Session unavailable",
         sessionResolved
@@ -1510,7 +1535,8 @@ async function revalidateMountedAgent(current) {
       error.requestId,
     );
   } finally {
-    if (view.isConnected) {
+    // A newer load may hold this same node on screen; only this check's lifetime releases it.
+    if (view.isConnected && lifetime.isCurrent(active)) {
       view.inert = false;
       if (
         isCurrent() &&

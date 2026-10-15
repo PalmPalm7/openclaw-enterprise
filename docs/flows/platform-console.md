@@ -120,11 +120,10 @@ stops reads. Missing provenance stays explicit.
 
 `apps/controller/src/console/console.mjs:loadPage`
 
-`loadPage` advances the request generation and requests `GET /api/auth/session`.
-First loads show loading. Return navigation and Refresh can restore one of at most
-16 document-local views keyed by route, Namespace, and session owner while reads
-run. Password fields and their derived discovery state clear before retention.
-Controls stay inert until admission succeeds; navigation remains available.
+`loadPage` starts a request generation with `GET /api/auth/session`. First visits
+show loading. Returns and Refresh keep the shown page inert during admission and
+reads; navigation stays available. Up to 16 views, keyed by route, Namespace, and
+session owner, are retained, excluding passwords and their discovery state.
 
 `apps/controller/src/console/api-client.mjs:createApiClient` keeps its composed
 abort signal through JSON and text body consumption. After headers arrive,
@@ -132,13 +131,12 @@ cancellation retains the signal's reason and socket failures reach the caller's
 interrupted-read recovery. Only JSON syntax failures become invalid-response
 errors; a failed body never causes an automatic replay.
 
-Completed views retain DOM, handlers, and draft capture callbacks. On return,
-`loadPage` rereads GET dependencies and compares data and user identity. Unchanged
-views reactivate; changed data or the first readable Namespace for a view without
-a selection rebuilds them.
+Completed views retain DOM, handlers, and draft callbacks. On return, `loadPage`
+checks GET dependencies and user identity. A match remounts the view, including expanded
+debug details. Changed data or the first readable Namespace for a view without a
+selection rebuilds it; Refresh always rebuilds.
 Pending or failed reads, password input, and mutations prevent reuse; read-only
-catalog and diagnostic POSTs do not. Refresh always rebuilds. Debug runtime
-disclosures retain expanded state under the same validation.
+catalog and diagnostic POSTs do not.
 
 A changed user or session key clears retained views and drafts before further
 private reads. Missing sessions open login; failed reads offer Retry.
@@ -169,8 +167,7 @@ selection or choosing the first ready/readable Namespace. Unreadable IDs stay
 unavailable; selection never becomes an API query selector.
 
 `shell.mjs:namespaceSelector` disables and hides choices through session and
-Namespace checks for loads, Refresh, and admission-starting navigation;
-retained-view reads do not extend this.
+Namespace checks, naming a known selection; retained-view reads do not extend this.
 `shell.mjs:createShell` listens for the 760px mobile breakpoint; widening closes
 the drawer without focusing its hidden toggle and releases `main.inert`.
 Empty lists show access guidance. `navigation.mjs:navigate` returns Agent detail/creation
@@ -376,6 +373,7 @@ refresh and inspection.
 
 ## Changelog
 
+- 2026-10-15 20:00: Hold pages until returns revalidate. (public-pr/2523)
 - 2026-10-15 19:40: Compress static console scripts and styles per `Accept-Encoding`. (console-gzip)
 - 2026-10-13 12:00: Explain outage sign-in reasons. (kc-guide-fix)
 - 2026-10-09 21:10: Preserve cancellation, deadline and transport failures during response body reads (authoring-run/2e195d67-c77d-43d0-8c32-2179523eb3a2 - 013bcf5f76819ca280a164745d470855fc5b74cd)
