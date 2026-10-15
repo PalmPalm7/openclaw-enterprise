@@ -1064,6 +1064,9 @@ function prepareHarnessAuth(
     // The paired Sandbox supplies the credential environment; no Secret is projected here.
     if (harness.id === "codex") {
       environment.push({ name: "CODEX_LOGIN_MODE", value: resolvedAuth.loginMode });
+      if (resolvedAuth.loginMode === "codex_pat") {
+        environment.push({ name: "OCE_CODEX_CREDENTIAL_SOURCE", value: "1" });
+      }
     }
     return {
       loginMode: resolvedAuth.loginMode,
@@ -3814,11 +3817,12 @@ export class KubernetesComputeDriver implements ComputeDriver {
         this.credentialGatewayDriver === undefined ||
         auth.credentialGatewayId !== this.credentialGatewayDriver.id ||
         credentialSourceType?.type !== auth.sourceType ||
-        credentialSourceType.harnessAuth?.loginMode !== "api_key" ||
+        (credentialSourceType.harnessAuth?.loginMode !== "api_key" &&
+          !(codex && credentialSourceType.harnessAuth?.loginMode === "codex_pat")) ||
         credentialSourceType.harnessAuth.modelProvider !== "openai"
       ) {
         throw new ConfigurationFailure(
-          "Credential-source Harness authentication requires the paired Sandbox and an OpenAI API key source.",
+          "Credential-source Harness authentication requires the paired Sandbox and a compatible OpenAI source.",
         );
       }
     }

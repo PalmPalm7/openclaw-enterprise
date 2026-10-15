@@ -41,6 +41,7 @@ import type {
   CredentialSource,
   CredentialSourceMetadata,
   CredentialSourceSnapshot,
+  CredentialSourceLoginMode,
   CredentialSourceStatus,
   CredentialWithdrawal,
   CredentialWithdrawalStatus,
@@ -6962,6 +6963,7 @@ export class OpenClawController {
         revisionHarness,
         compute,
         sandbox,
+        harnessAuth.method === "credential_source" ? harnessAuth.loginMode : undefined,
       );
       // The Compute rules first, as on Configuration save, so a stored Configuration that
       // predates a rule both refuse gets the message its next save would.
@@ -10595,10 +10597,13 @@ export class OpenClawController {
     harness: RevisionHarnessDescriptor,
     compute: ComputeDriver,
     sandbox: SandboxDriver | undefined,
+    credentialSourceLoginMode?: CredentialSourceLoginMode,
   ): OpenClawConfigurationDocument {
     const sandboxConfiguration =
       sandbox?.configureAgent !== undefined
-        ? frozenValues(sandbox.configureAgent(frozenValues(values), harness))
+        ? frozenValues(
+            sandbox.configureAgent(frozenValues(values), harness, credentialSourceLoginMode),
+          )
         : values;
     return frozenValues(
       compute.runtimeLogging === "driver"

@@ -459,7 +459,7 @@ test("startup pairs the Credential Refresh Driver with its gateway on one OpenSh
   const staticOnly = await loadInstallationFile(t, withoutRefresh);
   assert.deepEqual(
     (await staticOnly.credentialGatewayDriver.listSourceTypes({ signal })).map(({ type }) => type),
-    ["openai", "bearer-token"],
+    ["openai", "codex-pat", "bearer-token"],
   );
 
   // Refresh state lives on the gateway's provider records, so the roles cannot be split.
@@ -566,7 +566,7 @@ test("OpenShell configures only the selected dedicated Harness runtime", () => {
     mode: "dedicated",
   });
   assert.deepEqual(codex.plugins.entries.codex.config.appServer, {
-    sandbox: "danger-full-access",
+    sandbox: "workspace-write",
     approvalsReviewer: "user",
   });
   assert.throws(
@@ -580,44 +580,43 @@ test("OpenShell configures only the selected dedicated Harness runtime", () => {
   );
 });
 
-test("OpenShell keeps dedicated Codex turns out of Codex's own sandbox (finding 1026)", () => {
+test("OpenShell selects Codex isolation from the admitted credential source", () => {
   const driver = new OpenShellSandboxDriver(sandboxInstallation().drivers.sandbox.configuration, {
     id: "openshell-sandbox",
     implementation: "openshell",
     backend: backendFor(workspaceGatewayClient()),
   });
   const harness = { id: "codex", version: "1.0.0", mode: "dedicated" };
-  // The documented OpenShell Configuration's guardian app-server, plus a member's model-backed
-  // reviewer. On a model the Gateway cannot verify for review, both make the pinned Gateway
-  // force a user reviewer, and with it a workspace-write turn sandbox that bwrap cannot start
-  // inside OpenShell. The explicit user reviewer keeps the frozen danger-full-access.
-  for (const approvalsReviewer of [undefined, "auto_review", "guardian_subagent", "user"]) {
-    const appServer = {
-      mode: "guardian",
-      approvalPolicy: "on-request",
-      sandbox: "read-only",
-      transport: "websocket",
-      url: "${APP_SERVER_URL}",
-      authToken: "${APP_SERVER_TOKEN}",
-      ...(approvalsReviewer === undefined ? {} : { approvalsReviewer }),
-    };
-    const configuration = {
-      plugins: { allow: ["codex"], entries: { codex: { enabled: true, config: { appServer } } } },
-    };
-    const configured = driver.configureAgent(configuration, harness);
-    assert.deepEqual(configured.plugins.entries.codex.config.appServer, {
-      mode: "guardian",
-      approvalPolicy: "on-request",
-      sandbox: "danger-full-access",
-      transport: "websocket",
-      url: "${APP_SERVER_URL}",
-      authToken: "${APP_SERVER_TOKEN}",
-      approvalsReviewer: "user",
-    });
-    assert.equal(configuration.plugins.entries.codex.config.appServer, appServer);
-    assert.equal(appServer.sandbox, "read-only");
-    // Status reads rerun the hook on stored work, so the pin must be idempotent.
-    assert.deepEqual(driver.configureAgent(configured, harness), configured);
+  // API keys preserve outer-only isolation; PAT and unresolved sources retain native policy.
+  for (const loginMode of [undefined, "codex_pat", "api_key"]) {
+    for (const approvalsReviewer of [undefined, "auto_review", "guardian_subagent", "user"]) {
+      const appServer = {
+        mode: "guardian",
+        approvalPolicy: "on-request",
+        sandbox: "read-only",
+        transport: "websocket",
+        url: "${APP_SERVER_URL}",
+        authToken: "${APP_SERVER_TOKEN}",
+        ...(approvalsReviewer === undefined ? {} : { approvalsReviewer }),
+      };
+      const configuration = {
+        plugins: { allow: ["codex"], entries: { codex: { enabled: true, config: { appServer } } } },
+      };
+      const configured = driver.configureAgent(configuration, harness, loginMode);
+      assert.deepEqual(configured.plugins.entries.codex.config.appServer, {
+        mode: "guardian",
+        approvalPolicy: "on-request",
+        sandbox: loginMode === "api_key" ? "danger-full-access" : "workspace-write",
+        transport: "websocket",
+        url: "${APP_SERVER_URL}",
+        authToken: "${APP_SERVER_TOKEN}",
+        approvalsReviewer: "user",
+      });
+      assert.equal(configuration.plugins.entries.codex.config.appServer, appServer);
+      assert.equal(appServer.sandbox, "read-only");
+      // Status reads rerun the hook on stored work, so the pin must be idempotent.
+      assert.deepEqual(driver.configureAgent(configured, harness, loginMode), configured);
+    }
   }
 });
 
@@ -2413,6 +2412,32 @@ function credentialGatewayOverProviders({ keepDeleted = false, toolBinaries } = 
   };
 }
 
+test("Codex PAT profiles admit native startup without granting the whole backend", async () => {
+  const { context, driver, profiles } = credentialGatewayOverProviders();
+  const source = context("cs_00000000-0000-4000-8000-0000000000c1");
+  await driver.registerSource(
+    { ...source, source: { ...source.source, type: "codex-pat" } },
+    { type: "codex-pat", config: {}, secrets: { access_token: "synthetic-codex-pat" } },
+  );
+  const [profile] = profiles.values();
+  // These are the pinned Codex dependency's startup, turn and usage-recovery routes. A broader backend
+  // or WHAM wildcard would release this credential to unrelated account APIs.
+  assert.deepEqual(profile.endpoints, [
+    {
+      host: "auth.openai.com",
+      port: 443,
+      protocol: "rest",
+      path: "/api/accounts/v1/user-auth-credential/whoami",
+    },
+    { host: "chatgpt.com", port: 443, protocol: "rest", path: "/backend-api/codex/**" },
+    { host: "chatgpt.com", port: 443, protocol: "rest", path: "/backend-api/wham/config/bundle" },
+    { host: "chatgpt.com", port: 443, protocol: "rest", path: "/backend-api/wham/accounts/check" },
+    { host: "chatgpt.com", port: 443, protocol: "rest", path: "/backend-api/wham/settings/user" },
+    { host: "chatgpt.com", port: 443, protocol: "rest", path: "/backend-api/wham/usage" },
+  ]);
+  assert.deepEqual(profile.binaries, ["/usr/local/bin/codex"]);
+});
+
 test("the OpenShell Credential Gateway acts only on its own source's provider", async () => {
   const {
     calls,
@@ -2694,7 +2719,7 @@ test("the OpenShell bearer-token type exists only with toolBinaries and validate
   const modelOnly = credentialGatewayOverProviders();
   assert.deepEqual(
     (await modelOnly.driver.listSourceTypes({})).map(({ type }) => type),
-    ["openai"],
+    ["openai", "codex-pat"],
   );
   const tokenInput = (config) => ({ type: "bearer-token", config, secrets: { token: "t0ken" } });
   const endpoint = { host: "api.example.com", env_var: "EXAMPLE_TOKEN" };
@@ -2723,7 +2748,7 @@ test("the OpenShell bearer-token type exists only with toolBinaries and validate
     credentialGatewayOverProviders({ toolBinaries: ["/usr/bin/curl"] });
   assert.deepEqual(
     (await driver.listSourceTypes({})).map(({ type }) => type),
-    ["openai", "bearer-token"],
+    ["openai", "codex-pat", "bearer-token"],
   );
   // Every invalid endpoint or placeholder variable is refused before any gateway effect.
   for (const config of [
