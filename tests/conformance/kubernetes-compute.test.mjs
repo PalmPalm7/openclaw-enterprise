@@ -14650,6 +14650,7 @@ test("retirement preserves active storage and node routing and deletes exact own
     }),
   );
   const agentId = "agent-revision-storage";
+  const compute = { id: driver.id, implementation: driver.implementation };
   const ownership = { namespaceId: tenant.id, agentId };
   const harnessNamespace = kubernetesNamespaceName(tenant.id);
   const namespace = kubernetesNamespaceName(tenant.id);
@@ -14839,6 +14840,7 @@ test("retirement preserves active storage and node routing and deletes exact own
       agentId,
       namespaceId: tenant.id,
       servicePrincipalId: "service-agent-revision-storage",
+      compute,
       harness: { mode: "dedicated" },
     },
     { name: harnessNamespace, plane: "execution" },
@@ -14852,6 +14854,7 @@ test("retirement preserves active storage and node routing and deletes exact own
         agentId,
         namespaceId: tenant.id,
         servicePrincipalId: "service-agent-revision-storage",
+        compute,
         harness: { mode: "dedicated" },
       },
       { name: harnessNamespace, plane: "execution" },
@@ -14876,6 +14879,7 @@ test("retirement preserves active storage and node routing and deletes exact own
       agentId,
       namespaceId: tenant.id,
       servicePrincipalId: "service-agent-revision-storage",
+      compute,
       harness: { mode: "dedicated" },
     },
     { name: harnessNamespace, plane: "execution" },
@@ -14933,6 +14937,7 @@ test("retirement preserves active storage and node routing and deletes exact own
       agentId,
       namespaceId: tenant.id,
       servicePrincipalId: "service-agent-revision-storage",
+      compute,
       harness: { mode: "dedicated" },
     },
     { name: harnessNamespace, plane: "execution" },
@@ -14992,6 +14997,7 @@ test("retirement preserves active storage and node routing and deletes exact own
       agentId,
       namespaceId: tenant.id,
       servicePrincipalId: "service-agent-revision-storage",
+      compute,
       harness: { mode: "dedicated" },
     },
     { name: harnessNamespace, plane: "execution" },

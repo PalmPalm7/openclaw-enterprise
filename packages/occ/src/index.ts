@@ -7129,32 +7129,38 @@ export class OpenClawController {
       }
       // PostgreSQL restamps createdAt on its own clock; the response carries the stored value.
       // The repository credential deadline above stays on this controller's clock.
+      const revisionDraft: AgentRevision = {
+        id: this.nextIdentifier("agent_revision"),
+        namespaceId: namespace.id,
+        agentId: lockedAgent.id,
+        revision: previous.length + 1,
+        backendId,
+        configurationId: configuration.id,
+        configurationKind: configuration.kind,
+        configurationGeneration: configuration.generation,
+        configuration: admittedConfiguration,
+        harness: revisionHarness,
+        compute: { id: compute.id, implementation: compute.implementation },
+        ...(sandbox === undefined ? {} : { sandboxDriverId: sandbox.id }),
+        ...(secretDriver === undefined ? {} : { secretDriverId: secretDriver.id, secretBindings }),
+        ...(pluginState === undefined ? {} : { plugins: pluginState }),
+        ...(lockedAgent.pluginApprovers === undefined
+          ? {}
+          : { pluginApprovers: lockedAgent.pluginApprovers }),
+        ...(repositoryCredentials === undefined ? {} : { repositoryCredentials }),
+        harnessAuth,
+        ...(credentialSources.length === 0 ? {} : { credentialSources }),
+        servicePrincipalId: lockedAgent.servicePrincipalId,
+        createdAt,
+      };
+      const computeAdmission = compute.admitRevision?.(freezeAgentRevision(revisionDraft));
       const revision = await state.revisions.createRevision(
         freezeAgentRevision({
-          id: this.nextIdentifier("agent_revision"),
-          namespaceId: namespace.id,
-          agentId: lockedAgent.id,
-          revision: previous.length + 1,
-          backendId,
-          configurationId: configuration.id,
-          configurationKind: configuration.kind,
-          configurationGeneration: configuration.generation,
-          configuration: admittedConfiguration,
-          harness: revisionHarness,
-          compute: { id: compute.id, implementation: compute.implementation },
-          ...(sandbox === undefined ? {} : { sandboxDriverId: sandbox.id }),
-          ...(secretDriver === undefined
-            ? {}
-            : { secretDriverId: secretDriver.id, secretBindings }),
-          ...(pluginState === undefined ? {} : { plugins: pluginState }),
-          ...(lockedAgent.pluginApprovers === undefined
-            ? {}
-            : { pluginApprovers: lockedAgent.pluginApprovers }),
-          ...(repositoryCredentials === undefined ? {} : { repositoryCredentials }),
-          harnessAuth,
-          ...(credentialSources.length === 0 ? {} : { credentialSources }),
-          servicePrincipalId: lockedAgent.servicePrincipalId,
-          createdAt,
+          ...revisionDraft,
+          compute: {
+            ...revisionDraft.compute,
+            ...(computeAdmission === undefined ? {} : { admission: computeAdmission }),
+          },
         }),
       );
       const running = await state.agents.transitionAgentDesiredRuntimeState(

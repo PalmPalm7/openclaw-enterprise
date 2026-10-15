@@ -1607,16 +1607,10 @@ server.listen(443, "0.0.0.0", () => console.log("broker-forwarder-ready"));
     ]);
     await waitForDockerLog(proxyName, /broker-forwarder-ready/);
 
-    const brokerCodexConfiguration = codexOpenClawConfiguration(
-      {},
-      [],
-      {
-        host: "git.oce.svc",
-        domains: {},
-      },
-      undefined,
-      true,
-    ).plugins.entries.codex.config;
+    const brokerCodexConfiguration = codexOpenClawConfiguration({}, [], {
+      repositoryBrokerNetworkPolicy: { host: "git.oce.svc", domains: {} },
+      dedicatedCodex: true,
+    }).plugins.entries.codex.config;
     const pluginRuntime = {
       manifest: { kind: "codex", selections: {} },
       brokerCodexConfiguration,

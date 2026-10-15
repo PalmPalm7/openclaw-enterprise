@@ -35,6 +35,27 @@ const installation = Object.freeze({
   name: "Configuration OCC conformance",
   createdAt: "2026-08-19T00:00:00.000Z",
 });
+
+test("deployment freezes and persists the Compute Driver's admission decision", async () => {
+  const { agent, compute, controller, namespace, state } = await fixture();
+  let decision = "peer-one";
+  compute.admitRevision = (draft) => {
+    assert.equal(Object.isFrozen(draft), true);
+    assert.equal(Object.isFrozen(draft.configuration), true);
+    assert.equal(Object.isFrozen(draft.compute), true);
+    return decision;
+  };
+  const revision = await controller.deployAgent(
+    administrator,
+    { namespaceId: namespace.id, agentId: agent.id },
+    resolveApprovedDevelopmentHarness,
+  );
+  decision = "peer-two";
+  const stored = await state.read((view) =>
+    view.revisions.findRevision(namespace.id, agent.id, revision.id),
+  );
+  assert.equal(stored.compute.admission, "peer-one");
+});
 async function fixture(options = {}) {
   const iamState = principalIAMState([administrator, deployOnly], "configuration-conformance");
   grantRole(iamState, administrator, {
