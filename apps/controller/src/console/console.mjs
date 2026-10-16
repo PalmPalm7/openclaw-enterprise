@@ -1,5 +1,10 @@
 import { element, button } from "./dom.mjs";
-import { renderAgentList, renderCreateAgent, renderAgentDetail } from "./agents.mjs";
+import {
+  clearResolvedSecretNames,
+  renderAgentList,
+  renderCreateAgent,
+  renderAgentDetail,
+} from "./agents.mjs";
 import { createApiClient } from "./api-client.mjs";
 import { createViewLifetime } from "./view-lifetime.mjs";
 import { createNavigation, pages } from "./navigation.mjs";
@@ -689,6 +694,7 @@ function clearPrivate() {
   installationAccessProbe = null;
   installationAdmin = null;
   clearRetainedViews();
+  clearResolvedSecretNames();
 }
 
 function clearDrafts() {
@@ -1466,7 +1472,19 @@ async function loadPage({
         }
       },
       setTitle: (title) => {
-        app.querySelector("h1").textContent = title;
+        const heading = app.querySelector("h1");
+        heading.textContent = title;
+        // The opening panel's heading had focus and the shell replaced it. Focus the Agent's
+        // heading as it appears, not once its tab's reads settle: on a slow link that left
+        // focus on body for 0.5-0.9 s (finding 1483).
+        if (
+          focusAgentResult &&
+          document.activeElement === document.body &&
+          lifetime.isCurrent(active)
+        ) {
+          heading.tabIndex = -1;
+          heading.focus({ preventScroll: true });
+        }
       },
       url: current.url,
       setTabNavigation(handler) {
@@ -1570,7 +1588,10 @@ async function loadPage({
         clearRetainedViewsForNamespace(selection);
       }
     }
-    focusAgentResult = document.activeElement === pendingAgentHeading;
+    // setTitle may already have moved that focus to the Agent's heading (finding 1483).
+    focusAgentResult =
+      document.activeElement === pendingAgentHeading ||
+      (focusAgentResult && document.activeElement === app.querySelector(".content h1"));
     shell = renderShell(current.feature);
     if (current.agentId && error.status === 404 && current.namespace === null) {
       // A typed or shared link has no Namespace, so the console read the Agent in
