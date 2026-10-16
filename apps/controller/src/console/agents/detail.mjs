@@ -135,6 +135,10 @@ function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+// A save's reread or its PATCH found a newer Configuration generation than the page's.
+const CONFIGURATION_CHANGED =
+  "The saved Configuration changed while you were editing. Reload this draft before saving.";
+
 // The page that holds the setting to change for failure codes whose cause the operator can
 // act on directly. The API's error message already states the next step (finding 1393), so
 // the console adds only the link.
@@ -2619,12 +2623,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
             ) {
               // The section offers Reload draft; reopening the editor kept failing against
               // the page's old generation until a browser reload (finding 1480).
-              throw Object.assign(
-                new Error(
-                  "The saved Configuration changed while you were editing. Reload this draft before saving.",
-                ),
-                { reloadRequired: true },
-              );
+              throw Object.assign(new Error(CONFIGURATION_CHANGED), { reloadRequired: true });
             }
             mutationStarted = true;
             const nextSecretBindings = options.secretBindings;
@@ -2637,6 +2636,9 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
                   ...(nextSecretBindings === undefined
                     ? {}
                     : { secretBindings: nextSecretBindings }),
+                  // A save from another browser after the reread above is refused, not
+                  // overwritten (finding 1505).
+                  expectedGeneration: snapshot.generation,
                 },
               },
             );
@@ -2665,6 +2667,15 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
             if (error.status === 401) {
               context.onExpired();
               throw new Error("Your session has expired.");
+            }
+            if (
+              error.status === 409 &&
+              error.code === "RESOURCE_CONFLICT" &&
+              mutationStarted &&
+              !configurationSaved
+            ) {
+              // The PATCH found a newer generation than the reread: the same recovery applies.
+              throw Object.assign(new Error(CONFIGURATION_CHANGED), { reloadRequired: true });
             }
             if (
               error.status !== undefined ||
@@ -3262,6 +3273,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       feedbackLocked = true;
       updateState();
       let mutationStarted = false;
+      let configurationSaved = false;
       try {
         const [freshAgent, freshConfig] = await Promise.all([
           request(path),
@@ -3277,8 +3289,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
           freshAgent.configurationId !== baseline.id ||
           freshConfig.generation !== baseline.generation
         ) {
-          feedback.textContent =
-            "The saved Configuration changed while you were editing. Reload this draft before saving.";
+          feedback.textContent = CONFIGURATION_CHANGED;
           feedbackLocked = true;
           reloadRequired = true;
           return;
@@ -3288,9 +3299,11 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
           `${namespacePath(namespaceId)}/configurations/${encodeURIComponent(baseline.id)}`,
           {
             method: "PATCH",
-            body: { values: nextValues },
+            // A save from another browser after the reread above is refused (finding 1505).
+            body: { values: nextValues, expectedGeneration: baseline.generation },
           },
         );
+        configurationSaved = true;
         if (context.isCurrent()) {
           context.drafts.forget("configuration");
           await refreshDraftInPlace({
@@ -3304,6 +3317,17 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
         }
         if (error.status === 401) {
           context.onExpired();
+          return;
+        }
+        if (
+          error.status === 409 &&
+          error.code === "RESOURCE_CONFLICT" &&
+          mutationStarted &&
+          !configurationSaved
+        ) {
+          feedback.textContent = CONFIGURATION_CHANGED;
+          feedbackLocked = true;
+          reloadRequired = true;
           return;
         }
         feedback.textContent = rejectionMessage(error, mutationStarted);
