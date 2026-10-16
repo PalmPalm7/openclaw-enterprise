@@ -2,7 +2,12 @@ import { defaultAgentModel } from "../../apps/controller/src/console/agents/star
 import { RUNTIME_WRAPPER_COMMAND } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
 import { nodeProgramArguments } from "../../apps/controller/src/drivers/compute/node-program.ts";
 import { openShellProviderName } from "../../apps/controller/src/backends/openshell.ts";
-import { failureSecrets, redactLogLine } from "../../scripts/ci/failure-redaction.mjs";
+import {
+  failureSecrets,
+  maskPrivateKeyLines,
+  newestMatchingLogLines,
+  redactLogLine,
+} from "../../scripts/ci/failure-redaction.mjs";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -31,6 +36,12 @@ import {
   openShellGatewayName,
   openshellHash as hash,
 } from "../helpers/openshell-kubernetes-real.mjs";
+import {
+  diagnosticDeadlineMs,
+  diagnosticRequestTimeout,
+  retryKubectlRead,
+  withinDiagnosticDeadline,
+} from "../helpers/kubernetes-real.mjs";
 import {
   createEnvoyWorkspaceGatewayPlan,
   ensureEnvoyGatewayControllers,
@@ -743,7 +754,13 @@ async function writeWorkerCompletionDiagnostics(options) {
     persisted,
     events: summarizeWorkerEvents(options.events, options.revisionId),
   };
-  process.stderr.write(`OpenShell worker completion diagnostic: ${JSON.stringify(diagnostic)}\n`);
+  // The reporter cuts the line at 1,000 characters, so the events there run newest first.
+  process.stderr.write(
+    `OpenShell worker completion diagnostic: ${JSON.stringify({
+      ...diagnostic,
+      events: [...diagnostic.events].reverse(),
+    })}\n`,
+  );
   return diagnostic;
 }
 
@@ -2545,36 +2562,43 @@ async function prepareProductionInstallation(
         GATEWAY_API_KEY: workspaceGateway.apiKey,
       },
     ]);
-    for (const namespace of new Set([placement, gatewayPlacement])) {
-      try {
-        for (const pod of await resources("pods", namespace)) {
-          for (const container of pod.spec.containers) {
-            if (!["agent", "gateway", "supervisor"].includes(container.name)) {
-              continue;
-            }
-            const logs = await kubectl(
-              "logs",
-              pod.metadata.name,
-              "--namespace",
-              namespace,
-              "--container",
-              container.name,
-              "--tail=80",
-            ).catch(() => "Pod logs unavailable");
-            const lines = logs
-              .split("\n")
-              .filter((line) => /error|fail|denied|refus|startup|NET:/iu.test(line))
-              .slice(-12);
-            for (const line of lines) {
-              process.stderr.write(
-                `OpenShell startup ${pod.metadata.name}/${container.name}: ${redactLogLine(line, secrets, 800)}\n`,
-              );
+    const startupDiagnostic = async () => {
+      for (const namespace of new Set([placement, gatewayPlacement])) {
+        try {
+          for (const pod of await diagnosticResources("pods", namespace)) {
+            for (const container of pod.spec.containers) {
+              if (!["agent", "gateway", "supervisor"].includes(container.name)) {
+                continue;
+              }
+              const logs = await diagnosticKubectl(
+                "logs",
+                pod.metadata.name,
+                "--namespace",
+                namespace,
+                "--container",
+                container.name,
+                "--tail=80",
+              ).catch(() => "Pod logs unavailable");
+              const lines = maskPrivateKeyLines(logs.split("\n"))
+                .filter((line) => /error|fail|denied|refus|startup|NET:/iu.test(line))
+                .slice(-12);
+              for (const line of lines) {
+                process.stderr.write(
+                  `OpenShell startup ${pod.metadata.name}/${container.name}: ${redactLogLine(line, secrets, 800)}\n`,
+                );
+              }
             }
           }
+        } catch {
+          process.stderr.write("OpenShell startup Pod diagnostics unavailable\n");
         }
-      } catch {
-        process.stderr.write("OpenShell startup Pod diagnostics unavailable\n");
       }
+      return false;
+    };
+    if (await withinDiagnosticDeadline(startupDiagnostic(), { timedOut: true })) {
+      process.stderr.write(
+        `OpenShell startup Pod diagnostics timed out after ${diagnosticDeadlineMs / 1_000} s\n`,
+      );
     }
     const provisioningFailure = createSandboxDriver.provisioningFailures.get(deployed.data.id);
     if (provisioningFailure !== undefined) {
@@ -4169,20 +4193,30 @@ const turnDiagnosticNoise =
   /identity scope grant elevated connection identity=occ-workspace-files|authenticated user (?:connected|disconnected) .*user=occ-workspace-files/u;
 
 function turnDiagnosticLines(logs, pattern, budget, secrets) {
-  const kept = [];
-  let length = 0;
-  for (const line of logs.split("\n").reverse()) {
-    if (!pattern.test(line) || turnDiagnosticNoise.test(line)) {
-      continue;
-    }
-    const shown = redactLogLine(line, secrets, turnDiagnosticLineChars);
-    if (length + shown.length + 1 > budget) {
-      break;
-    }
-    kept.push(shown);
-    length += shown.length + 1;
-  }
-  return kept.reverse().join("\n");
+  return newestMatchingLogLines(logs, secrets, {
+    pattern,
+    exclude: turnDiagnosticNoise,
+    budget,
+    lineChars: turnDiagnosticLineChars,
+  });
+}
+
+// Failure diagnostics read with a request timeout, so a stalled API server or log stream
+// cannot hold them (finding 1550). A read retries a dropped transport once: kubectl reports
+// its own request timeout as a transient failure, and each attempt may take the whole timeout.
+function diagnosticKubectl(...args) {
+  return retryKubectlRead(() => kubectl(diagnosticRequestTimeout, ...args), { attempts: 2 });
+}
+
+async function diagnosticResource(kind, name, namespace) {
+  return JSON.parse(
+    await diagnosticKubectl("get", kind, name, "--namespace", namespace, "-o", "json"),
+  );
+}
+
+async function diagnosticResources(kind, namespace) {
+  return JSON.parse(await diagnosticKubectl("get", kind, "--namespace", namespace, "-o", "json"))
+    .items;
 }
 
 // The network supervisor serving this Harness shares its boundary pair, as in the L7 denial
@@ -4196,7 +4230,7 @@ async function openShellSupervisorPod(topology) {
   if (!boundaryPair) {
     throw new Error("the Harness has no openshell.ai/boundary-pair label");
   }
-  const supervisors = (await resources("pods", topology.placement)).filter(
+  const supervisors = (await diagnosticResources("pods", topology.placement)).filter(
     (pod) =>
       pod.metadata.labels?.["openshell.ai/boundary-role"] === "supervisor" &&
       pod.metadata.labels?.["openshell.ai/boundary-pair"] === boundaryPair,
@@ -4220,7 +4254,14 @@ function turnFailureSecrets(topology, gatewayPassword) {
 
 // `budgets` lets a caller that adds its own sections keep the whole message under 16 KiB.
 // Without a Harness Pod (a replacement that never started one) only the Gateway is read.
-async function gatewayTurnFailureDiagnostic(
+function gatewayTurnFailureDiagnostic(topology, gatewayPassword, budgets) {
+  return withinDiagnosticDeadline(
+    readGatewayTurnFailureDiagnostic(topology, gatewayPassword, budgets),
+    { timedOut: `\nGateway turn diagnostic timed out after ${diagnosticDeadlineMs / 1_000} s` },
+  );
+}
+
+async function readGatewayTurnFailureDiagnostic(
   topology,
   gatewayPassword,
   { gateway = 5_000, harness = 4_000, supervisor = 4_000 } = {},
@@ -4279,7 +4320,7 @@ async function gatewayTurnFailureDiagnostic(
       continue;
     }
     try {
-      const logs = await kubectl(
+      const logs = await diagnosticKubectl(
         "logs",
         source.name,
         "--namespace",
@@ -4297,7 +4338,11 @@ async function gatewayTurnFailureDiagnostic(
     if (topology.harnessPod === undefined) {
       throw missingHarness;
     }
-    const pod = await resource("pod", topology.harnessPod.metadata.name, topology.placement);
+    const pod = await diagnosticResource(
+      "pod",
+      topology.harnessPod.metadata.name,
+      topology.placement,
+    );
     const containers = (pod.status?.containerStatuses ?? []).map((status) => ({
       name: status.name,
       state: status.state,
@@ -5123,7 +5168,7 @@ const untrustedTurnObservationChars = 1_000;
 
 // A failure diagnostic redacts the Gateway password when it can read it, and runs without it.
 async function diagnosticGatewayPassword(topology) {
-  const passwordSecret = await resource(
+  const passwordSecret = await diagnosticResource(
     "secret",
     `gateway-password-${hash(topology.agent.id)}`,
     topology.gatewayPlacement,
@@ -5191,13 +5236,13 @@ async function replacementActivationDiagnostic(topology, revision, worker) {
   let harnessPod;
   let gatewayPod;
   try {
-    const agentPods = (await resources("pods", topology.placement)).filter(
+    const agentPods = (await diagnosticResources("pods", topology.placement)).filter(
       (pod) =>
         pod.metadata.labels?.["openclaw.dev/workload-role"] === "agent" &&
         pod.metadata.labels?.["openclaw.dev/agent"] === revision.agentId &&
         pod.metadata.labels?.["openclaw.dev/revision"] === revision.id,
     );
-    const gatewayPods = (await resources("pods", topology.gatewayPlacement)).filter(
+    const gatewayPods = (await diagnosticResources("pods", topology.gatewayPlacement)).filter(
       (pod) =>
         pod.metadata.labels?.["openclaw.dev/workload-role"] === "gateway" &&
         pod.metadata.labels?.["openclaw.dev/agent"] === revision.agentId,
@@ -5283,10 +5328,13 @@ async function assertDuplicateReconciliationDoesNotDuplicateOpenShell(topology) 
     });
   } catch (error) {
     const worker = await topology.diagnoseRevision(redeployed.data.id);
-    // A diagnostic that fails itself must not replace the timeout it explains.
-    const detail = await replacementActivationDiagnostic(topology, redeployed.data, worker).catch(
-      (diagnosticError) =>
-        `\nReplacement diagnostic unavailable: ${diagnosticError?.name ?? "Error"}`,
+    // A diagnostic that fails or stalls itself must not replace the timeout it explains.
+    const detail = await withinDiagnosticDeadline(
+      replacementActivationDiagnostic(topology, redeployed.data, worker).catch(
+        (diagnosticError) =>
+          `\nReplacement diagnostic unavailable: ${diagnosticError?.name ?? "Error"}`,
+      ),
+      { timedOut: `\nReplacement diagnostic timed out after ${diagnosticDeadlineMs / 1_000} s` },
     );
     // Keep the timeout's own stack, which names this wait, and add the evidence to its message.
     if (error instanceof Error) {
