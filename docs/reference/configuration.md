@@ -117,13 +117,15 @@ after the referenced Namespace-owned Secrets exist.
 OCC generates the `cfg_` identifier and derives ownership from the exact route
 Namespace; callers cannot select either field. GET, PATCH, and DELETE operate
 on `/namespaces/:namespaceId/configurations/:configurationId`. A PATCH body
-requires the replacement `values` and may also set `secretBindings`, for example:
+requires the replacement `values` and may also set `secretBindings` and
+`expectedGeneration`. For a Configuration last read at generation `1`, send:
 
 ```json
 {
   "values": {
     "agents": { "defaults": { "sandbox": { "mode": "all" } } }
-  }
+  },
+  "expectedGeneration": 1
 }
 ```
 
@@ -133,6 +135,15 @@ omitted `models` and `secrets` sections disappear. Omitting `secretBindings` on
 PATCH preserves the existing bindings; send `{}` to clear them. PATCH cannot
 change or accept `kind`, `generation`, or ownership fields. Successful DELETE
 returns HTTP `204` with no body.
+
+`expectedGeneration` is an optional positive safe integer from the caller's last
+GET. OCC compares it with the current generation while holding the Configuration
+lock. A mismatch returns `409 RESOURCE_CONFLICT` without replacing values or
+Secret bindings or incrementing the generation. Read the Configuration again,
+merge the intended edits with its current values, and submit that generation;
+do not retry the stale body with a newer number. Omitting `expectedGeneration`
+replaces whichever generation is current, without this freshness check. The
+console's Configuration and channel saves include it.
 
 Creation requires `kind: "agent"`; missing or unsupported kinds are rejected.
 Additional consumer kinds are reserved for future approved resources and are
@@ -244,6 +255,10 @@ The Kubernetes Configuration Driver stores live native documents in tenant Confi
   selected Kubernetes identity's namespaced ConfigMap Role separately.
 - **Configuration operation returns `404`:** Confirm the Configuration ID
   belongs to the Namespace in the request path.
+- **Configuration update returns `409 RESOURCE_CONFLICT`:** If the message says
+  the Configuration changed since it was read, repeat GET and merge your edits
+  before submitting the current `expectedGeneration`. In the console, choose
+  **Reload draft** and reapply the edits to the current Configuration.
 - **Configuration deletion returns `409`:** An Agent still references that
   Configuration. Reassign every referencing Agent, or
   [delete the Agents](agents.md#deletion) and wait for teardown before retrying.
