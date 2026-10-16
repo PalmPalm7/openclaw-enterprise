@@ -199,7 +199,9 @@ export function renderAgentList(context) {
     );
     const body = element("tbody");
     for (const item of matches) {
-      const deployment = element("td", {}, "Reading deployment…");
+      // The cell keeps its column's width once its read lands, and its outcome link and one
+      // note line fit the two lines the Agent cell already gives the row (finding 1488).
+      const deployment = element("td", { className: "agent-deployment" }, "Reading deployment…");
       if (!deployments.has(item.id)) {
         deployments.set(
           item.id,
@@ -235,25 +237,21 @@ export function renderAgentList(context) {
             ),
           );
           const neutral = neutralDeploymentOutcome(result.status);
-          if (neutral) {
-            deployment.append(
-              element(
-                "span",
-                { className: "resource-id" },
-                `${NEUTRAL_DEPLOYMENT_NOTES[neutral]}.`,
-              ),
-            );
-          } else if (result.status.status === "failed") {
-            deployment.append(
-              element(
-                "span",
-                { className: "resource-id" },
-                result.status.error?.message ?? "Deployment failed.",
-              ),
-            );
-          }
+          const failure =
+            !neutral && result.status.status === "failed"
+              ? (result.status.error?.message ?? "Deployment failed.")
+              : null;
+          // A long failure fits one line; its title and the Agent page give the whole text.
           deployment.append(
-            element("span", { className: "resource-id" }, "Serving health unverified"),
+            element(
+              "span",
+              {
+                className: "resource-id agent-deployment-note",
+                ...(failure ? { title: failure } : {}),
+              },
+              failure ??
+                (neutral ? `${NEUTRAL_DEPLOYMENT_NOTES[neutral]}.` : "Serving health unverified"),
+            ),
           );
         })
         .catch((error) => {

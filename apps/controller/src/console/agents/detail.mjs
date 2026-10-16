@@ -337,8 +337,10 @@ function deploymentProgress(record) {
 }
 
 export const DEPLOYMENT_POLL_MS = 5000;
-// Longest wait for Deployment activity's first read before the sections below it show.
-export const FIRST_ACTIVITY_WAIT_MS = 1000;
+// Longest wait for Deployment activity's first read before the sections below it show. On a
+// slow link that read lands over a second after the page, and a failed version's banner then
+// pushed the shown overview down (finding 1489).
+export const FIRST_ACTIVITY_WAIT_MS = 2000;
 const PENDING_DEPLOYMENT_STATUSES = new Set(["queued", "running"]);
 
 function createDeploymentStatusPanel(context, path, revision, onAgentChange, onStatusChange) {
@@ -1740,12 +1742,16 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       // page below moves once instead of once for an empty panel and again for the status.
       // A newer version found later replaces the shown (older) panel at once.
       const firstLoad = activityPanel === deploymentStatus;
-      const showPanel = (panel) => {
+      // A failed version's banner also waits for the caller's permission answer (finding
+      // 1478), so the overview waits for it too rather than move when the banner lands.
+      const showPanel = (panel, failed = false) => {
         if (activityPanel !== panel) {
           activityPanel.replaceWith(panel);
           activityPanel = panel;
         }
-        void nativeAdmin.ready.then(revealDetail);
+        void Promise.all([nativeAdmin.ready, failed ? callerPermissionsRead : null]).then(
+          revealDetail,
+        );
       };
       const nextPanel = mostRecent
         ? createDeploymentStatusPanel(
@@ -1762,7 +1768,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
               if (activityRevisionId !== mostRecent.id) {
                 return;
               }
-              showPanel(nextPanel);
+              showPanel(nextPanel, status === "failed");
               latestDeploymentStatus = status;
               latestDeploymentError = unavailable;
               latestDeploymentErrorCode = errorCode;
@@ -2361,6 +2367,11 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       mountedTab.reusable = false;
     }
     savedNotice = saved;
+    // A save lands well after its click, and the rebuilt tab is usually shorter than the editor
+    // it replaces. When the cards below the version layout are in view, scroll by the layout's
+    // change, so they keep their place and the summary takes the editor's (finding 1482).
+    const bottomBefore = versionLayout.getBoundingClientRect().bottom;
+    const anchorBelow = bottomBefore < globalThis.innerHeight;
     try {
       await renderTab();
     } finally {
@@ -2368,6 +2379,10 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     }
     if (!context.isCurrent()) {
       return;
+    }
+    const shrunk = versionLayout.getBoundingClientRect().bottom - bottomBefore;
+    if (anchorBelow && shrunk < 0) {
+      globalThis.scrollBy({ top: shrunk, behavior: "instant" });
     }
     const named = [...content.querySelectorAll("button")].find(
       (candidate) => candidate.textContent === focus && !candidate.disabled,
