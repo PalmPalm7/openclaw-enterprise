@@ -111,3 +111,62 @@ test("an untouched or unchanged document reports nothing mixed", () => {
   assert.deepEqual(carryDocument(base, base, { auth: { mode: "none" } }).mixed, []);
   assert.deepEqual(carryDocument(base, { auth: { mode: "none" } }, base).mixed, []);
 });
+
+// One browser changed a key that holds an object, the other a plain sibling: the recursion
+// covers the object, so the parent is not named (finding 1541).
+test("an object-valued change beside a plain sibling's change names nothing", () => {
+  const probes = [
+    // gateway.auth.mode against gateway.port
+    [
+      { gateway: { auth: { mode: "token" }, port: 18789 } },
+      { gateway: { auth: { mode: "password" }, port: 18789 } },
+      { gateway: { auth: { mode: "token" }, port: 18790 } },
+    ],
+    // agents.defaults.model.primary against agents.defaults.timeoutSeconds
+    [
+      { agents: { defaults: { model: { primary: "a" }, timeoutSeconds: 60 } } },
+      { agents: { defaults: { model: { primary: "b" }, timeoutSeconds: 60 } } },
+      { agents: { defaults: { model: { primary: "a" }, timeoutSeconds: 90 } } },
+    ],
+    // channels.slack.dmPolicy against the channels.slack.channels map
+    [
+      { channels: { slack: { dmPolicy: "open", channels: {} } } },
+      { channels: { slack: { dmPolicy: "disabled", channels: {} } } },
+      { channels: { slack: { dmPolicy: "open", channels: { C1: { allow: true } } } } },
+    ],
+  ];
+  for (const [base, mine, current] of probes) {
+    const merged = carryDocument(base, mine, current);
+    assert.deepEqual(merged.conflicts, []);
+    assert.deepEqual(merged.mixed, []);
+  }
+  // Plain keys changed separately inside such an object are still named.
+  const auth = carryDocument(
+    { gateway: { auth: { mode: "token" }, port: 18789 } },
+    { gateway: { auth: { mode: "password" }, port: 18789 } },
+    { gateway: { auth: { mode: "token", token: ref("GATEWAY_TOKEN") }, port: 18790 } },
+  );
+  assert.deepEqual(auth.mixed, ["/gateway/auth"]);
+});
+
+// A Secret reference is an object in the document, but changing its id selects another Secret.
+// Whether the reference was added or changed must not decide if we flag the mixed auth settings.
+test("changing an existing Secret reference beside an auth mode change names their object", () => {
+  const auth = { mode: "token", token: ref("GATEWAY_TOKEN") };
+  const base = { gateway: { auth } };
+  const switched = {
+    gateway: { auth: { ...auth, mode: "password", password: ref("GATEWAY_PASSWORD") } },
+  };
+  const rotated = { gateway: { auth: { ...auth, token: ref("NEXT_GATEWAY_TOKEN") } } };
+  const expected = { ...switched.gateway.auth, token: rotated.gateway.auth.token };
+
+  for (const [mine, current] of [
+    [switched, rotated],
+    [rotated, switched],
+  ]) {
+    const { value, conflicts, mixed } = carryDocument(base, mine, current);
+    assert.deepEqual(value.gateway.auth, expected);
+    assert.deepEqual(conflicts, []);
+    assert.deepEqual(mixed, ["/gateway/auth"]);
+  }
+});
