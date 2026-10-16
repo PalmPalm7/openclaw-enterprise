@@ -245,6 +245,11 @@ export function renderAgentLogs(
   let followTimer;
   let statusTimer;
   let reading = false;
+  // Counts status reads. A newer read supersedes one in flight: its answer, success or
+  // failure, may predate a revocation the newer one sees.
+  let statusRead = 0;
+  // Set once a log read was allowed: a refusal after that is a revocation.
+  let logsAllowed = false;
   // A source, Pod or instance change while a read is in flight restarts the view after it.
   let restartPending = false;
   let rows = 0;
@@ -333,6 +338,13 @@ export function renderAgentLogs(
     setFollow(false);
     renderPickers();
     onLogsDenied();
+    // One revoke often removes operate too: ask for status once now, so the Pod cards it showed
+    // do not stay under the log refusal until the next status poll (finding 1597). This read
+    // supersedes one in flight, which may have been authorized before the revoke. A first
+    // read refused revokes nothing.
+    if (logsAllowed && !statusDenied && description !== null) {
+      void loadStatus();
+    }
   }
 
   function renderStrip() {
@@ -453,6 +465,10 @@ export function renderAgentLogs(
     if (!current()) {
       return;
     }
+    // Taken before any wait, so even a load that reads nothing (hidden page, remembered
+    // refusal) supersedes a read in flight.
+    const ticket = ++statusRead;
+    const superseded = () => ticket !== statusRead;
     if (deniedStatusViews.has(statusKey)) {
       // A rebuilt view compares the denial with a fresh answer, so an operate grant since
       // shows on the next visit to Logs (finding 1579). Back's check already compared a
@@ -477,18 +493,24 @@ export function renderAgentLogs(
     if (!document.hidden) {
       try {
         const first = description === null;
-        description = await read(base);
-        if (!current()) {
+        const answer = await read(base);
+        // A superseded first answer still opens the view, unless a refusal has taken its place.
+        if (!current() || (superseded() && description !== null)) {
           return;
         }
+        description = answer;
         statusDenied = false;
         renderStrip();
         renderPickers();
         if (first && !logsDenied) {
           firstLogRead = readLogs({ restart: true });
         }
+        if (superseded()) {
+          // The newer load schedules the next poll.
+          return;
+        }
       } catch (error) {
-        if (!current()) {
+        if (!current() || superseded()) {
           return;
         }
         if (error.status === 401) {
@@ -613,6 +635,7 @@ export function renderAgentLogs(
         throw new Error("The log download did not return text.");
       }
       showLogError(null);
+      logsAllowed = true;
       const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
       const link = element("a", {
         href: url,
@@ -703,6 +726,7 @@ export function renderAgentLogs(
         return;
       }
       showLogError(null);
+      logsAllowed = true;
       cursor = page.cursor;
       appendRecords(page.records);
       if (statusDenied) {
