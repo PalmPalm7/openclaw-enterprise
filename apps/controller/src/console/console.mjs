@@ -946,12 +946,13 @@ function showCheckingSession() {
   if (!shown) {
     app.replaceChildren(status);
   }
-  // Delay the announcement, never the session check or the view that replaces it.
+  // Delay the announcement, never the session check or the view that replaces it. It waits
+  // until the status is visible (400 ms, console.css), so screen readers announce the change.
   setTimeout(() => {
     if (status.isConnected) {
       status.textContent = "Checking session…";
     }
-  }, 300);
+  }, 400);
 }
 
 async function loadPage({
@@ -1300,6 +1301,15 @@ async function loadPage({
     // loading) is replaced once, by the page itself (finding 1407).
     let firstItems = null;
     let firstAgent = null;
+    // The Agents list and Create Agent paint with the caller's permission answer, never enabled
+    // and then refused (findings 1517, 1521). Gating only: the API still authorizes creation, so
+    // an unknown answer (a failed read) keeps the controls.
+    const permissionsPath = `/namespaces/${encodeURIComponent(namespaceId)}/permissions`;
+    const permissionsRead =
+      !agentsNamespaceUnavailable && current.feature === "agents" && !current.agentId
+        ? request(permissionsPath).catch(() => null)
+        : null;
+    let firstPermissions = null;
     if (!agentsNamespaceUnavailable && current.feature !== "settings" && !current.creating) {
       if (current.agentId) {
         firstAgent = await request(
@@ -1315,6 +1325,12 @@ async function loadPage({
                   : `/namespaces/${encodeURIComponent(namespaceId)}/agents`,
               );
       }
+      if (!lifetime.isCurrent(active)) {
+        return;
+      }
+    }
+    if (permissionsRead) {
+      firstPermissions = await permissionsRead;
       if (!lifetime.isCurrent(active)) {
         return;
       }
@@ -1335,6 +1351,9 @@ async function loadPage({
             : `/namespaces/${encodeURIComponent(namespaceId)}/agents`,
           firstItems,
         );
+      }
+      if (firstPermissions !== null) {
+        fresh.set(permissionsPath, firstPermissions);
       }
       const validations = await Promise.allSettled(
         [...retainedState.reads.keys()].map(async (path) => {
@@ -1529,10 +1548,17 @@ async function loadPage({
         }
       },
     };
+    if (firstPermissions !== null) {
+      viewState.reads.set(permissionsPath, readSignature(firstPermissions));
+    } else if (permissionsRead) {
+      // Painted without the permissions answer: a return reads it again instead of reusing this.
+      viewState.reusable = false;
+    }
     if (current.creating) {
       renderCreateAgent(
         {
           ...agentContext,
+          permissions: firstPermissions,
           setDiscardOnExit(discard) {
             discardCreationOnExit = discard ? { namespaceId } : null;
           },
@@ -1625,7 +1651,7 @@ async function loadPage({
       JSON.stringify(items),
     );
     if (current.feature === "agents") {
-      renderAgentList({ ...agentContext, items });
+      renderAgentList({ ...agentContext, items, permissions: firstPermissions });
       showChatLinkFailure(shell.view, chatLinkFailure);
     } else {
       if (current.feature === "backends" && backendsDenied) {

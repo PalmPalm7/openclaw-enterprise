@@ -1331,6 +1331,44 @@ test("the console shell paints a neutral status before any script runs and keeps
   }
 });
 
+// Full loads replaced the boot status after 50-274 ms, so the slower ones painted it for a frame
+// past the 250 ms delay (finding 1519). With classic scrollbars, a short page and a long one put
+// the header 15 px apart (finding 1520).
+test("the boot status stays hidden through a fast load and the scrollbar keeps its space", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const { page } = await newPage(t, fixture);
+  const script = await holdRequests(t, page, "**/console/console.mjs");
+  await page.goto(`${fixture.origin}/console/agents`, { waitUntil: "commit" });
+  await script.requested;
+  const status = page.locator("#app > p.startup[role='status']");
+  await status.waitFor({ state: "attached" });
+  // Read the status's look at fixed times into its animation, independent of host load. A fresh
+  // copy starts its own animation, which a loaded host may already have finished on the original.
+  const shown = await status.evaluate((node) => {
+    const copy = node.cloneNode(true);
+    node.after(copy);
+    const [animation] = copy.getAnimations();
+    animation.pause();
+    const looks = [0, 300, 399, 600].map((time) => {
+      animation.currentTime = time;
+      const style = globalThis.getComputedStyle(copy);
+      return style.visibility === "hidden" || Number(style.opacity) === 0 ? "hidden" : "shown";
+    });
+    copy.remove();
+    return looks;
+  });
+  assert.deepEqual(shown, ["hidden", "hidden", "hidden", "shown"]);
+  assert.equal(
+    await page.evaluate(
+      () => globalThis.getComputedStyle(globalThis.document.documentElement).scrollbarGutter,
+    ),
+    "stable",
+  );
+  script.release();
+  await page.getByLabel("Username").waitFor();
+});
+
 // The web font is fetched alongside the stylesheet, so it is ready before the console's first
 // view renders instead of arriving 1.6-2 s after first paint and reflowing text (finding 1448).
 test("the console web font is ready before the entry script runs, fetched once", async (t) => {

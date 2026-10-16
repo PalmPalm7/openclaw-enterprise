@@ -180,11 +180,11 @@ Installation-wide collection. No readable selection means no Agent request.
 returning safe startup summaries. Empty configuration returns an empty list;
 missing wiring or failed dependencies return errors.
 
-`apps/controller/src/console/agents/create.mjs:renderCreateAgent` composes Provider,
-Harness, Preset, Configuration, and workspace inputs. Provider/Harness changes
-reset incompatible credentials and model choices while retaining unrelated JSON. The
-[creation reference](../reference/console/create-and-deploy.md) owns combinations,
-Preset constraints, token handling, permissions, and recovery.
+Agents and Create Agent read Namespace permissions before rendering. If `agents.create`
+is false, both explain the restriction. If the read fails, creation stays available;
+the API authorizes every create. Changing Provider or Harness resets incompatible
+credentials and model choices, preserving unrelated JSON. See
+[Agent creation](../reference/console/create-and-deploy.md) for inputs and recovery.
 
 `agents/plugin-fields.mjs:createPluginFields` edits Agent `plugins` separately
 from Configuration. Invalid JSON and untouched fields survive; clearing overrides
@@ -283,15 +283,11 @@ Password values clear while [draft captures](platform-console/agent-editing.md#4
 Secret saves update the shared draft snapshot used by other tabs and deployment
 preflight.
 
-`agents/detail.mjs:renderAgentDetail` passes an `agents/list.mjs:link` to
-`deploymentFailure` for **Open vN Logs**. Client navigation selects the failed
-revision's `tab=logs`, even from the draft or a different version. Once the
-snapshot read and the panel's first reads settle, it focuses the Logs tab and
-scrolls the panel into view if the view is still current. Until then the tab keeps
-its height and hides Stop and Delete, which appear in place. The panel's
-`agents/logs.mjs:renderAgentLogs` reads that revision's runtime status and output,
-or displays its access or availability error;
-[Agent runtime logs](agent-runtime-logs.md) owns those reads.
+**Open vN Logs** selects the failed revision, even from a draft or another version.
+The tab keeps its height while loading; Stop and Delete appear in place. If the view
+is still current, focus moves to Logs and the output scrolls into view. Clicking the
+Logs tab instead keeps the strip in place when the output is already visible.
+[Agent runtime logs](agent-runtime-logs.md) covers status, output, and access errors.
 
 ### 7. Commit only the current response, or clear the view
 
@@ -369,6 +365,7 @@ refresh and inspection.
 
 ## Changelog
 
+- 2026-10-16 12:00: Paint Create Agent with its permission answer; keep a clicked Logs tab's strip in place. (ui-jank-code-9)
 - 2026-10-16 11:30: Hold the shown page in its own navigation and header; show an Agent’s heading and overview together when ready. (ui-jank-code-9)
 - 2026-10-15 23:00: Keep views across abandoned returns; show slow rechecks. (console-nav-1015)
 - 2026-10-15 20:00: Hold pages until returns revalidate. (public-pr/2523)

@@ -2422,7 +2422,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     control.focus();
   }
 
-  async function renderTab() {
+  async function renderTab({ activated = false } = {}) {
     // A Logs view left before it showed no longer holds the cards below it back.
     view.classList.remove("agent-logs-opening");
     const resumeDrafts = context.suspendDrafts();
@@ -2441,8 +2441,18 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       }
       mountedTab = null;
     }
+    // A tab the reader chose keeps its strip where it was used: the version evidence above it
+    // hides for Workspace and Logs and returns for the others (finding 1518). At the top of the
+    // page the heading stays in view instead.
+    const stripTop = activated && window.scrollY > 0 ? tabs.getBoundingClientRect().top : null;
     renderDetailHeading();
     versionEvidence.hidden = selectedTab === "workspace" || selectedTab === "logs";
+    if (stripTop !== null) {
+      const moved = tabs.getBoundingClientRect().top - stripTop;
+      if (Math.abs(moved) >= 1) {
+        window.scrollBy({ top: moved, left: 0, behavior: "instant" });
+      }
+    }
     const tab = selectedTab;
     for (const [index, id] of tabsForSelection.entries()) {
       const control = tabs.children[index];
@@ -2529,7 +2539,15 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve)));
       if (tabContext.isCurrent() && !deleting) {
         tabControls.get("logs").focus({ preventScroll: true });
-        detailPane.scrollIntoView({ block: "start" });
+        // A strip clicked in view with the output starting on screen stays put (finding 1518).
+        // A link or address that opens Logs scrolls the output into view as before.
+        const stripKept =
+          activated &&
+          tabs.getBoundingClientRect().top >= 0 &&
+          content.getBoundingClientRect().top < innerHeight - Math.min(200, innerHeight / 3);
+        if (!stripKept) {
+          detailPane.scrollIntoView({ block: "start" });
+        }
       }
       return;
     }
@@ -3502,7 +3520,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     if (!recovery.hidden) {
       renderLatestDeployment();
     }
-    void renderTab();
+    void renderTab({ activated: true });
     return true;
   });
   if (selectedTab === "workspace") {
