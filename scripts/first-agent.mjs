@@ -12,6 +12,8 @@ import { findFirstAgentSecret, grantFirstAgentSecret } from "./first-agent-datab
 import { defaultAgentModel } from "../apps/controller/src/console/agents/starter-model.mjs";
 import { deriveNativeAdminHost } from "../apps/controller/src/gateway/native-admin-host.mjs";
 import {
+  firstAgentPriorPatPolicy,
+  firstAgentPriorPatPolicyWarning,
   firstAgentRevisionValuesMatch,
   selectFirstAgentModel,
   verifyFirstAgentModel,
@@ -679,6 +681,7 @@ function assertManagedRevision(revision, record, expected, priorRevisionId) {
       "This Agent revision was changed outside this helper. Use a new Agent name or manage this Agent through OCC.",
     );
   }
+  return firstAgentPriorPatPolicy(values, record, revision.id, priorRevisionId);
 }
 
 function assertManagedCredentialSource(source, record, secret) {
@@ -954,6 +957,8 @@ async function main(options) {
     }
 
     let expectedConfiguration;
+    // Saved revisions frozen with the former PAT policy: reported if this run verifies one.
+    const priorPatRevisions = new Set();
     if (agent) {
       assertManagedAgent(agent, record);
       record.agentId = agent.id;
@@ -965,7 +970,9 @@ async function main(options) {
           "GET",
           `${base}/agents/${agent.id}/revisions/${revisionId}`,
         );
-        assertManagedRevision(storedRevision, record, expectedConfiguration, revisionId);
+        if (assertManagedRevision(storedRevision, record, expectedConfiguration, revisionId)) {
+          priorPatRevisions.add(revisionId);
+        }
       }
     }
 
@@ -1129,6 +1136,10 @@ async function main(options) {
       local.nativeAdmin?.browserOrigin ?? local.origin,
     );
     consoleUrl.searchParams.set("namespace", namespace.id);
+    // Before the result, so the response on stdout cannot bury it.
+    if (priorPatRevisions.has(record.revisionId)) {
+      progress(firstAgentPriorPatPolicyWarning(record.revisionId));
+    }
     process.stdout.write(
       `Agent: ${options.name}\nAgent ID: ${agent.id}\nRevision: ${record.revisionId}\nHarness: ${record.harness}\nModel: ${record.harness === "codex" ? "codex" : "openai"}/${model}\nModel response verified: ${proof.nonce}\nConsole: ${consoleUrl}\n`,
     );
