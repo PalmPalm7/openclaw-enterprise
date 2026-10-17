@@ -10,7 +10,9 @@ import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import {
+  abandonedTeardownExitGraceMs,
   assertProbeDenied,
+  boundedTeardown,
   createKubernetesClient,
   diagnosticDeadlinePassed,
   diagnosticRequestTimeout,
@@ -21,6 +23,7 @@ import {
   probeDenial,
   retryKubectlRead,
   retryKubectlWrite,
+  teardownStepLimitMs,
   withinDiagnosticDeadline,
 } from "../helpers/kubernetes-real.mjs";
 import { refusingPort } from "../helpers/available-port.mjs";
@@ -185,6 +188,168 @@ test(
         throw failure;
       }),
       (error) => error === failure,
+    );
+  },
+);
+
+// A test context stand-in: records the hook boundedTeardown registers, and keeps a private field
+// so a member read through the teardown's context must be bound to the real one.
+class RecordingContext {
+  #name = "recorded test";
+  hooks = [];
+  get name() {
+    return this.#name;
+  }
+  diagnostic(message) {
+    return `${this.#name}: ${message}`;
+  }
+  after(hook) {
+    this.hooks.push(hook);
+  }
+}
+
+test(
+  "a bounded teardown runs every cleanup last-registered first, also after one fails",
+  { timeout: 5_000 },
+  async () => {
+    // Finding 1711: node:test runs a test's own after hooks first-registered first and skips the
+    // rest once one throws, so a failed Namespace delete skipped the worker stop.
+    const testContext = new RecordingContext();
+    const logs = [];
+    const exits = [];
+    const teardown = boundedTeardown(testContext, {
+      label: "probe teardown",
+      log: (message) => logs.push(message),
+      exit: () => exits.push("exit"),
+    });
+    const { context } = teardown;
+    const ran = [];
+    context.after(() => ran.push("namespace delete"));
+    context.after(() => {
+      ran.push("role delete");
+      throw new Error("roles are gone");
+    });
+    context.after(async () => {
+      ran.push("worker stop");
+      // A cleanup registered during teardown runs next.
+      context.after(() => ran.push("late cleanup"));
+    });
+    assert.equal(testContext.hooks.length, 1, "one node:test hook holds every cleanup");
+    assert.equal(teardown.started, false);
+    await assert.rejects(testContext.hooks[0](), (error) => {
+      assert.match(
+        error.message,
+        /^cleanup registered at kubernetes-real-kubectl\.test\.mjs:\d+: roles are gone$/,
+      );
+      return true;
+    });
+    assert.equal(teardown.started, true);
+    assert.deepEqual(ran, ["worker stop", "late cleanup", "role delete", "namespace delete"]);
+    assert.equal(logs.length, 5);
+    assert.ok(logs.every((line) => /^probe teardown: cleanup registered at /.test(line)));
+    assert.match(logs[3], /kubernetes-real-kubectl\.test\.mjs:\d+ failed: roles are gone$/);
+    assert.deepEqual(exits, [], "nothing was abandoned, so the process is left to exit itself");
+    // Other members read through the teardown's context come from the test's own.
+    assert.equal(context.name, "recorded test");
+    assert.equal(context.diagnostic("note"), "recorded test: note");
+  },
+);
+
+test(
+  "a bounded teardown abandons a stalled cleanup, runs the rest and ends the process",
+  { timeout: 5_000 },
+  async () => {
+    const testContext = new RecordingContext();
+    const logs = [];
+    const exits = [];
+    const { context } = boundedTeardown(testContext, {
+      stepLimitMs: 50,
+      exitGraceMs: 10,
+      log: (message) => logs.push(message),
+      exit: () => exits.push("exit"),
+    });
+    const ran = [];
+    context.after(() => ran.push("namespace delete"));
+    // Never settles, like a worker stop waiting on an operation that ignores its abort.
+    context.after(() => new Promise(() => {}));
+    context.after(() => ran.push("port-forward stop"));
+    await assert.rejects(testContext.hooks[0](), /: did not finish within 50 ms$/);
+    assert.deepEqual(ran, ["port-forward stop", "namespace delete"]);
+    assert.match(
+      logs.at(-1),
+      /^teardown: exiting in 10 ms; abandoned cleanups registered at kubernetes-real-kubectl\.test\.mjs:\d+$/,
+    );
+    await delay(100);
+    assert.deepEqual(exits, ["exit"]);
+    assert.equal(teardownStepLimitMs, 180_000, "longer than the 120 s Namespace delete waits");
+    assert.equal(abandonedTeardownExitGraceMs, 2_000);
+  },
+);
+
+test(
+  "the OpenShell proof's installation cleanups all run when its worker stop never settles",
+  { timeout: 20_000 },
+  async () => {
+    // Finding 1711: the proof's own cleanup registration, in a real node:test process. The
+    // worker stop never settles and its poll interval keeps the process alive; every later
+    // cleanup must still be attempted, the stalled one named, and the file must exit by itself.
+    // Registering all six as one cleanup would attempt only the worker stop.
+    const kubernetesHelper = new URL("../helpers/kubernetes-real.mjs", import.meta.url).href;
+    const openShellHelper = new URL("../helpers/openshell-kubernetes-real.mjs", import.meta.url)
+      .href;
+    const script = `
+      import test from "node:test";
+      import { boundedTeardown } from ${JSON.stringify(kubernetesHelper)};
+      import { registerOpenShellInstallationCleanups } from ${JSON.stringify(openShellHelper)};
+      const attempt = (name) => process.stdout.write("attempted " + name + "\\n");
+      test("proof", async (testContext) => {
+        const { context } = boundedTeardown(testContext, { stepLimitMs: 200, exitGraceMs: 50 });
+        let poll;
+        registerOpenShellInstallationCleanups(context, {
+          workerStop: () => {
+            attempt("worker stop");
+            return new Promise(() => poll);
+          },
+          portForwards: () => attempt("port-forwards"),
+          productionApp: () => attempt("production app"),
+          observerPool: () => attempt("observer pool"),
+          workloadNamespace: () => attempt("workload Namespace"),
+          temporaryDirectory: () => attempt("temporary directory"),
+        });
+        // Assigned after registration, like the proof's worker: cleanups read it when they run.
+        poll = setInterval(() => {}, 50);
+        throw new Error("replacement timed out");
+      });
+    `;
+    // Run it as its own node:test root, not as a child reporting to this runner.
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    const started = Date.now();
+    const exited = await execute(process.execPath, ["--input-type=module", "-e", script], {
+      env,
+      timeout: 15_000,
+    }).then(
+      () => ({ code: 0, stdout: "", stderr: "" }),
+      (error) => error,
+    );
+    assert.ok(Date.now() - started < 10_000, "the file exited soon after its teardown");
+    assert.notEqual(exited.killed, true, "the file exited on its own");
+    assert.equal(exited.code, 1);
+    assert.deepEqual(exited.stdout.match(/^attempted .+$/gm), [
+      "attempted worker stop",
+      "attempted port-forwards",
+      "attempted production app",
+      "attempted observer pool",
+      "attempted workload Namespace",
+      "attempted temporary directory",
+    ]);
+    assert.match(
+      exited.stderr,
+      /teardown: cleanup workerStop registered at openshell-kubernetes-real\.mjs:\d+ failed: did not finish within 200 ms/,
+    );
+    assert.match(
+      exited.stderr,
+      /teardown: exiting in 50 ms; abandoned cleanups workerStop registered at openshell-kubernetes-real\.mjs:\d+/,
     );
   },
 );

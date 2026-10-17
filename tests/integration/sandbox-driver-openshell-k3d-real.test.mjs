@@ -36,8 +36,10 @@ import {
   openShellAgentName,
   openShellGatewayName,
   openshellHash as hash,
+  registerOpenShellInstallationCleanups,
 } from "../helpers/openshell-kubernetes-real.mjs";
 import {
+  boundedTeardown,
   diagnosticDeadlineMs,
   diagnosticDeadlinePassed,
   diagnosticRequestTimeout,
@@ -353,6 +355,7 @@ async function createScopedController(context, identifier, platformNamespace, ku
     clusterRoleBinding: binding,
     context: `openshell-production-${suffix}`,
   });
+  const tokenMintedAt = new Date().toISOString();
   await kubectl(
     "create",
     "clusterrole",
@@ -376,7 +379,7 @@ async function createScopedController(context, identifier, platformNamespace, ku
     clusterRoleBinding: apiBinding,
     context: `openshell-secret-api-${suffix}`,
   });
-  return { ...identity, tenantRole, apiSecretRole, apiIdentity };
+  return { ...identity, tokenMintedAt, tenantRole, apiSecretRole, apiIdentity };
 }
 
 function nativeCodexConfiguration(gatewayAuth) {
@@ -2040,6 +2043,41 @@ function withFirstPrepareRevisionFailureDiagnostic(computeDriver) {
   });
 }
 
+// The Kubernetes client's rejection of a request the API server refused to authenticate.
+function isKubernetesUnauthorized(error) {
+  return error?.code === 401 || /^HTTP-Code: 401$/m.test(String(error?.message));
+}
+
+// Whether the test's bounded teardown has begun, for the 401 diagnostic below.
+let teardownStarted = () => false;
+
+// Finding 1711: a 401 on prepareRevision names no credential. On the first one, `tokenSources()`
+// names the credentials the call may have used, by name and kind, never a value.
+function withUnauthorizedTokenSourceDiagnostic(computeDriver, tokenSources) {
+  let reported = false;
+  return new Proxy(computeDriver, {
+    get(target, property) {
+      if (property === "prepareRevision") {
+        return async (...args) => {
+          try {
+            return await target.prepareRevision(...args);
+          } catch (error) {
+            if (!reported && isKubernetesUnauthorized(error)) {
+              reported = true;
+              process.stderr.write(
+                `OpenShell integration: Compute prepareRevision got HTTP 401; token sources: ${JSON.stringify(tokenSources())}\n`,
+              );
+            }
+            throw error;
+          }
+        };
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 async function prepareProductionInstallation(
   context,
   { harnessId = "codex", controllerPort } = {},
@@ -2222,6 +2260,17 @@ async function prepareProductionInstallation(
     createOpenShellBackend: createSandboxDriver.createBackend,
     createSandboxDriver,
   });
+  // Names and kinds only: no credential value reaches the log.
+  const tokenSources = () => ({
+    compute: {
+      kubeconfigContext: controller.authentication.context,
+      user: `system:serviceaccount:${platformNamespace}:${controller.account}`,
+      kind: "ServiceAccount token (kubectl create token, default lifetime)",
+      mintedAt: controller.tokenMintedAt,
+    },
+    sandboxOperator: { kubeconfigContext: kubernetesContext, kind: "test operator kubeconfig" },
+    teardownStarted: teardownStarted(),
+  });
   const loadWorkerDrivers = async () => {
     const loaded = await loadInstallationConfiguration({
       mode: "production",
@@ -2235,7 +2284,10 @@ async function prepareProductionInstallation(
       workerDrivers: loaded,
       diagnosticWorkerDrivers: {
         ...loaded,
-        computeDriver: withFirstPrepareRevisionFailureDiagnostic(loaded.computeDriver),
+        computeDriver: withUnauthorizedTokenSourceDiagnostic(
+          withFirstPrepareRevisionFailureDiagnostic(loaded.computeDriver),
+          tokenSources,
+        ),
       },
     };
   };
@@ -2265,35 +2317,22 @@ async function prepareProductionInstallation(
   let controllerUrl;
   let placement;
   let gatewayPlacement;
-  context.after(async () => {
-    const cleanupFailures = [];
-    const cleanupStep = async (description, operation) => {
-      try {
-        await operation();
-      } catch (error) {
-        cleanupFailures.push(new Error(`${description}: ${error.message}`, { cause: error }));
-      }
-    };
-
-    await cleanupStep("controller worker", async () => {
+  registerOpenShellInstallationCleanups(context, {
+    workerStop: async () => {
       if (worker !== undefined) {
         await worker.stop();
       } else if (workerPool !== undefined) {
         await workerPool.end();
       }
-    });
-    await cleanupStep("OpenShell management port-forwards", async () => {
-      await createSandboxDriver.disposeGatewayForwards();
-    });
-    await cleanupStep("production app", async () => {
+    },
+    portForwards: () => createSandboxDriver.disposeGatewayForwards(),
+    productionApp: async () => {
       if (productionApp !== undefined) {
         await productionApp.close();
       }
-    });
-    await cleanupStep("observer pool", async () => {
-      await observerPool.end();
-    });
-    await cleanupStep("Kubernetes namespace", async () => {
+    },
+    observerPool: () => observerPool.end(),
+    workloadNamespace: async () => {
       if (placement !== undefined) {
         await kubectl(
           "delete",
@@ -2304,16 +2343,8 @@ async function prepareProductionInstallation(
           "--timeout=120s",
         );
       }
-    });
-    await cleanupStep("temporary directory", async () => {
-      await rm(directory, { recursive: true, force: true });
-    });
-    if (cleanupFailures.length > 0) {
-      throw new AggregateError(
-        cleanupFailures,
-        `OpenShell integration cleanup reported ${cleanupFailures.length} failure(s).`,
-      );
-    }
+    },
+    temporaryDirectory: () => rm(directory, { recursive: true, force: true }),
   });
 
   const existing = await new PostgresPlatformState(observerPool).loadInstallation();
@@ -6255,7 +6286,11 @@ test(
     ...requiresOpenShellK3d,
     ...(demoStatePath === undefined ? { timeout: 2_400_000 } : {}),
   },
-  async (context) => {
+  async (testContext) => {
+    // Finding 1711: every cleanup this test registers runs, last-registered first, each bounded.
+    const teardown = boundedTeardown(testContext, { label: "OpenShell integration teardown" });
+    teardownStarted = () => teardown.started;
+    const { context } = teardown;
     if (demoStatePath !== undefined) {
       context.after(() => {
         process.removeListener("SIGINT", resolveDemoStop);
