@@ -887,6 +887,8 @@ function dedicatedFirstDeployFixture({
   const state = {
     setupCalls: 0,
     connected: false,
+    // What a redeemed setup reports about the node's connection (enrolled, not connected yet).
+    observedConnected: true,
     enrollmentAvailable: true,
     // The node OpenClaw reports applied through the wrapper's runtime status,
     // or the reason it has not.
@@ -941,7 +943,9 @@ function dedicatedFirstDeployFixture({
                 clock.now + 250 > deadline ||
                 (options?.stopWaiting !== undefined && (await options.stopWaiting()))
               ) {
-                return state.connected ? { deviceId: "node-1", connected: true } : undefined;
+                return state.connected
+                  ? { deviceId: "node-1", connected: state.observedConnected }
+                  : undefined;
               }
               clock.now += 250;
             }
@@ -958,7 +962,9 @@ function dedicatedFirstDeployFixture({
             } else if (!state.connected) {
               clock.now = deadline;
             }
-            return state.connected ? { deviceId: "node-1", connected: true } : undefined;
+            return state.connected
+              ? { deviceId: "node-1", connected: state.observedConnected }
+              : undefined;
           }
           const deadline = Date.now() + (options?.waitMs ?? 0);
           while (!state.connected && Date.now() < deadline) {
@@ -968,7 +974,9 @@ function dedicatedFirstDeployFixture({
             signal.throwIfAborted();
             await new Promise((resolve) => setTimeout(resolve, 2));
           }
-          return state.connected ? { deviceId: "node-1", connected: true } : undefined;
+          return state.connected
+            ? { deviceId: "node-1", connected: state.observedConnected }
+            : undefined;
         },
         async isConnected() {
           return state.connected;
@@ -1442,7 +1450,15 @@ test("native OpenClaw preparation and activation use only outbound Sandbox enrol
     async harnessEndpoint() {
       assert.fail("native OpenClaw has no inbound Harness endpoint");
     },
+    async withdrawHarnessExposure(context) {
+      withdrawals.push(context);
+      if (withdrawalFailure !== undefined) {
+        throw withdrawalFailure;
+      }
+    },
   };
+  const withdrawals = [];
+  let withdrawalFailure;
   const fixture = dedicatedFirstDeployFixture({
     sandboxDriver,
     revision: {
@@ -1547,8 +1563,28 @@ test("native OpenClaw preparation and activation use only outbound Sandbox enrol
   const nodePending = await prepare();
   assert.equal(nodePending.ready, false);
   assert.equal(nodePending.pendingReason, "WORKSPACE_NODE_PENDING");
+  // Finding 1657: the provider is told the node has not enrolled, and no exposure is withdrawn
+  // before it has.
+  assert.ok(provisions.every(({ workspaceNodeEnrolled }) => workspaceNodeEnrolled === false));
+  assert.deepEqual(withdrawals, []);
+  // A node that has enrolled but is not connected yet already loses the exposure: the pass
+  // that records its device withdraws. A deletion the provider does not confirm keeps its
+  // class and the pass fails; the provider completes the withdrawal on its next adoption.
   state.connected = true;
+  state.observedConnected = false;
+  withdrawalFailure = new Error("OpenShell DeleteService did not confirm deletion.");
+  await assert.rejects(prepare(), /did not confirm deletion/);
+  assert.equal(withdrawals.length, 1);
+  assert.equal(withdrawals[0].revision, revision);
+  assert.equal(withdrawals[0].workspaceNodeEnrolled, true);
+  assert.deepEqual(withdrawals[0].requirements.labels, provisions[0].requirements.labels);
+  assert.equal(provisions.at(-1).workspaceNodeEnrolled, false);
+  // With the device recorded, later passes provision with the node enrolled and withdraw
+  // nothing more; the connected node makes the revision ready.
+  withdrawalFailure = undefined;
   assert.equal((await prepare()).ready, true);
+  assert.equal(provisions.at(-1).workspaceNodeEnrolled, true);
+  assert.equal(withdrawals.length, 1);
   assert.deepEqual(read("NetworkPolicy", stale.metadata.name), stale);
   assert.deepEqual(deleted, []);
   await assert.rejects(
@@ -1601,7 +1637,9 @@ test("Kubernetes native Sandbox provisioning fails a revision on the worker's he
   };
   const provisions = [];
   const observations = [];
+  const withdrawals = [];
   let answer = { state: "starting" };
+  let withdrawalFailure;
   const sandboxDriver = {
     id: "native-sandbox",
     implementation: "openshell",
@@ -1626,7 +1664,16 @@ test("Kubernetes native Sandbox provisioning fails a revision on the worker's he
     },
     async harnessStatus(context) {
       observations.push(context);
+      if (answer instanceof Error) {
+        throw answer;
+      }
       return answer;
+    },
+    async withdrawHarnessExposure(context) {
+      withdrawals.push(context);
+      if (withdrawalFailure !== undefined) {
+        throw withdrawalFailure;
+      }
     },
   };
   const { revision, state, namespace, gatewayName, markReady, prepare } =
@@ -1695,12 +1742,67 @@ test("Kubernetes native Sandbox provisioning fails a revision on the worker's he
     answer = { state: "failed", runtimeFailure };
     await assert.rejects(prepare(), /Runtime failure status returned invalid data/);
   }
-  // Once the node has connected the worker is past its checks: nothing more is read.
+  // Finding 1658: a provider that does not answer is no evidence. The read's failure is a
+  // transient dependency failure the worker rechecks until the deadline without spending
+  // attempts: a Driver's own classification passes through, a plain dependency failure is
+  // classified here, and a refusal keeps its class.
+  const unanswered = new DependencyUnavailableError(
+    "OpenShell GetService failed with gRPC status 14.",
+  );
+  answer = unanswered;
+  await assert.rejects(prepare(), (error) => {
+    assert.ok(error instanceof TransientDependencyError, String(error));
+    assert.equal(error.dependency, "sandbox_gateway");
+    assert.equal(error.reason, "unavailable");
+    assert.equal(error.code, "SANDBOX_GATEWAY_UNAVAILABLE");
+    assert.equal(error.cause, unanswered);
+    return true;
+  });
+  const classified = new TransientDependencyError("sandbox_gateway", "timeout", "timed out");
+  answer = classified;
+  await assert.rejects(prepare(), (error) => error === classified);
+  const refusal = new Error("OpenShell refused the observation: PERMISSION_DENIED");
+  answer = refusal;
+  await assert.rejects(prepare(), (error) => error === refusal);
+  // Every read so far told the provider the node had not enrolled.
+  assert.ok(observations.every(({ workspaceNodeEnrolled }) => workspaceNodeEnrolled === false));
+  assert.ok(provisions.every(({ workspaceNodeEnrolled }) => workspaceNodeEnrolled === false));
+  assert.deepEqual(withdrawals, []);
+  // Once the node has connected the worker is past its checks: nothing more is read, and the
+  // exposure the reads used is withdrawn before the revision is ready (finding 1657). A
+  // withdrawal the provider cannot confirm keeps the revision unready.
   answer = { state: "starting" };
   state.connected = true;
   observations.length = 0;
-  assert.equal((await prepare()).ready, true);
+  // A provider that does not answer the withdrawal is as transient as one that does not
+  // answer the read, and keeps the revision unready.
+  const unansweredWithdrawal = new DependencyUnavailableError(
+    "OpenShell DeleteService failed with gRPC status 14.",
+  );
+  withdrawalFailure = unansweredWithdrawal;
+  await assert.rejects(prepare(), (error) => {
+    assert.ok(error instanceof TransientDependencyError, String(error));
+    assert.equal(error.code, "SANDBOX_GATEWAY_UNAVAILABLE");
+    assert.equal(error.cause, unansweredWithdrawal);
+    return true;
+  });
+  assert.equal(withdrawals.length, 1);
+  assert.equal(withdrawals[0].workspaceNodeEnrolled, true);
   assert.deepEqual(observations, []);
+  // The device is recorded: the provider now provisions with the node enrolled, which has
+  // it complete the withdrawal itself, and Compute asks for no second withdrawal.
+  withdrawalFailure = undefined;
+  assert.equal((await prepare()).ready, true);
+  assert.equal(provisions.at(-1).workspaceNodeEnrolled, true);
+  assert.equal(withdrawals.length, 1);
+  assert.deepEqual(observations, []);
+  // An enrolled node that is reconnecting is waited for, not read: the exposure is gone, and
+  // the worker is past the checks the read was for.
+  state.connected = false;
+  assert.equal((await prepare()).ready, false);
+  assert.equal(provisions.at(-1).workspaceNodeEnrolled, true);
+  assert.deepEqual(observations, []);
+  assert.equal(withdrawals.length, 1);
 });
 
 // Finding 1297: the projection covers every setting the Harness model rule checks, not only
