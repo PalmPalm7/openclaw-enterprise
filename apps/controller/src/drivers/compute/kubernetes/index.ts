@@ -1270,6 +1270,9 @@ const WORKSPACE_NODE_PAIRING_WAIT_MS = 8_000;
 // one (a full map, or a controller restart) only grants that setup one more wait.
 const MAX_WORKSPACE_NODE_PAIRING_BUDGETS = 1_024;
 const WORKSPACE_NODE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+// The node Secret key naming the revision whose node readiness last saw paired or connected;
+// the device itself is the Agent's (finding 1671).
+const WORKSPACE_NODE_ENROLLED_REVISION_KEY = "enrolledRevisionId";
 const GATEWAY_PRIVATE_STATE_CATEGORIES = Object.freeze([
   ["state", "/home/node/.openclaw/state"],
   ["agent", "/home/node/.openclaw/agents/main/agent"],
@@ -6197,7 +6200,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
           if (nativeRuntime !== undefined && !nodeEnrolled) {
             // The readiness check may have recorded the device of a node that enrolled but
             // is not connected yet: the exposure goes now, not on the next pass.
-            if ((await this.workspaceNodeDeviceId(revision, namespace)) !== undefined) {
+            if (await this.workspaceNodeEnrolled(revision, namespace)) {
               await withdrawProviderExposure();
             } else if (sandboxDriver.harnessStatus !== undefined) {
               // A dedicated OpenClaw worker holding a failed model check never connects
@@ -10398,6 +10401,8 @@ export class KubernetesComputeDriver implements ComputeDriver {
         setupId: setup.setupId,
         setupCode: setup.setupCode,
         expiresAtMs: String(setup.expiresAtMs),
+        // The device observed on an expired setup may have been redeemed by a predecessor's
+        // node; the revision whose node connects is credited by the readiness check.
         ...(observed === undefined ? {} : { deviceId: observed.deviceId }),
       };
       const clients = await this.clients(namespace.plane);
@@ -10645,9 +10650,15 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
   }
 
   /**
-   * Whether the revision's workspace node has ever enrolled: its node Secret records the device.
-   * Without node enrollment there is no enrollment window to observe a provider-owned Harness
-   * in, as `workspaceNodeReady` holds, so a native exposure is withdrawn on the first pass.
+   * Whether this revision's workspace node has enrolled: the node Secret records the device,
+   * and names this revision as the one whose node readiness saw paired or connected. The
+   * device is the Agent's and outlives revisions, so without the second part every redeploy
+   * would count as enrolled from its first pass, skip the provider's held-failure read and
+   * create its exposure only to delete it at once (finding 1671). A Secret that records a
+   * device under no revision was written before this check existed; its revision is the one
+   * that enrolled it, so it still counts. Without node enrollment there is no enrollment window
+   * to observe a provider-owned Harness in, as `workspaceNodeReady` holds, so a native exposure
+   * is withdrawn on the first pass.
    */
   private async workspaceNodeEnrolled(
     revision: AgentRevision,
@@ -10660,7 +10671,17 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     ) {
       return true;
     }
-    return (await this.workspaceNodeDeviceId(revision, namespace)) !== undefined;
+    const secret = await this.getOwned(
+      "Secret",
+      this.workspaceNodeName(revision),
+      namespace,
+      this.workspaceNodeOwnership(revision),
+    );
+    const read = (key: string) => Buffer.from(secret?.data?.[key] ?? "", "base64").toString("utf8");
+    const enrolledRevisionId = read(WORKSPACE_NODE_ENROLLED_REVISION_KEY);
+    return (
+      read("deviceId") !== "" && (enrolledRevisionId === "" || enrolledRevisionId === revision.id)
+    );
   }
 
   private async workspaceNodeReady(
@@ -10720,11 +10741,43 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       }
     };
     if (deviceId) {
-      if (dropSetupCode && secret.data?.setupCode !== undefined) {
-        await replaceSecret(withoutSetupCode(secret.data));
+      const dropping = dropSetupCode && secret.data?.setupCode !== undefined;
+      let connected: boolean;
+      try {
+        connected = await enrollment.isConnected(url, deviceId, this.operationSignal());
+      } catch (error) {
+        // The code goes even when the Gateway does not answer; that answer is the error kept.
+        if (dropping) {
+          try {
+            await replaceSecret(withoutSetupCode(secret.data ?? {}));
+            await setupCodeRemoved();
+          } catch {
+            // The next pass drops it.
+          }
+        }
+        throw error;
+      }
+      // A replacement reconnects as the Agent's device. Record that this revision's node is
+      // the one connected, so this revision counts as enrolled from here on (finding 1671).
+      // The marker names the revision, not its Sandbox: the same revision given a new Sandbox
+      // (a stop and start, a removed stale Sandbox) counts as enrolled from its first pass and
+      // takes the pre-marker path, which fails closed. One write with the dropped code: a
+      // second replace with the same resourceVersion would conflict.
+      const marking = connected && read(WORKSPACE_NODE_ENROLLED_REVISION_KEY) !== revision.id;
+      if (dropping || marking) {
+        await replaceSecret({
+          ...withoutSetupCode(secret.data ?? {}),
+          ...(marking
+            ? {
+                [WORKSPACE_NODE_ENROLLED_REVISION_KEY]: Buffer.from(revision.id, "utf8").toString(
+                  "base64",
+                ),
+              }
+            : {}),
+        });
         await setupCodeRemoved();
       }
-      return enrollment.isConnected(url, deviceId, this.operationSignal());
+      return connected;
     }
     const setupId = required(read("setupId"), "Workspace node setup ID");
     const spentMs = this.workspaceNodePairingSpentMs.get(setupId) ?? 0;
@@ -10764,6 +10817,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       withoutSetupCode({
         ...secret.data,
         deviceId: Buffer.from(observation.deviceId, "utf8").toString("base64"),
+        [WORKSPACE_NODE_ENROLLED_REVISION_KEY]: Buffer.from(revision.id, "utf8").toString("base64"),
       }),
     );
     // With the device recorded, later passes check its presence, not the setup.

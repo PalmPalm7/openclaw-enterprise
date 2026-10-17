@@ -965,7 +965,8 @@ export class ControllerWorker {
   private readonly convergenceTimeoutMs: number;
   private readonly maintenanceIntervalMs: number | undefined;
   // Keyed by revision ID; undefined until the start-time listing has run.
-  private harnessExposureWithdrawals: Map<string, PendingHarnessExposureWithdrawal> | undefined;
+  private readonly harnessExposureWithdrawals = new Map<string, PendingHarnessExposureWithdrawal>();
+  private harnessExposureListed = false;
   private harnessExposureListingFailures = 0;
   private claimedLastPass = false;
   private readonly repoDriver: RepoDriver | undefined;
@@ -3021,12 +3022,15 @@ export class ControllerWorker {
     if (compute.withdrawHarnessExposure === undefined || this.stopping) {
       return;
     }
-    if (this.harnessExposureWithdrawals === undefined) {
-      if (this.harnessExposureListingFailures >= MAX_HARNESS_EXPOSURE_WITHDRAWAL_ATTEMPTS) {
-        return;
-      }
+    // Listed once per start, with bounded retries; candidates handed over by terminal
+    // failures share the map and are withdrawn whether or not the listing succeeded.
+    if (
+      !this.harnessExposureListed &&
+      this.harnessExposureListingFailures < MAX_HARNESS_EXPOSURE_WITHDRAWAL_ATTEMPTS
+    ) {
+      let listed: Map<string, PendingHarnessExposureWithdrawal> | undefined;
       try {
-        this.harnessExposureWithdrawals = await this.listHarnessExposureWithdrawals();
+        listed = await this.listHarnessExposureWithdrawals();
       } catch {
         if (this.stopping || this.abort.signal.aborted) {
           return;
@@ -3037,13 +3041,20 @@ export class ControllerWorker {
           code: "WORKER_UNAVAILABLE",
           attempt: this.harnessExposureListingFailures,
         });
-        return;
       }
-      if (this.harnessExposureWithdrawals.size > 0) {
-        this.emit({
-          event: "worker.harness-exposure-sweep",
-          pending: this.harnessExposureWithdrawals.size,
-        });
+      if (listed !== undefined) {
+        this.harnessExposureListed = true;
+        for (const [revisionId, candidate] of listed) {
+          if (!this.harnessExposureWithdrawals.has(revisionId)) {
+            this.harnessExposureWithdrawals.set(revisionId, candidate);
+          }
+        }
+        if (this.harnessExposureWithdrawals.size > 0) {
+          this.emit({
+            event: "worker.harness-exposure-sweep",
+            pending: this.harnessExposureWithdrawals.size,
+          });
+        }
       }
     }
     const now = Date.now();
@@ -3086,6 +3097,42 @@ export class ControllerWorker {
     }
     this.harnessExposureWithdrawals.delete(revision.id);
     this.emit({ event: "worker.harness-exposure-withdrawn", ...fields });
+  }
+
+  /**
+   * A candidate that failed for good keeps its Sandbox for diagnosis, and with it the exposure
+   * Compute's status read used, which nothing reads any more and which the Gateway's node
+   * binding never closed (finding 1672): the sweep withdraws it from the next pass on, and a
+   * restart lists it again from its failed deployment (as a non-active revision). An active
+   * revision is left alone: its exposure went with its readiness. The failure is already
+   * committed, so a read that fails here only defers the withdrawal to the next start.
+   */
+  private async scheduleFailedCandidateExposureWithdrawal(claim: ClaimedWork): Promise<void> {
+    if (
+      this.compute.withdrawHarnessExposure === undefined ||
+      claim.agentId === undefined ||
+      claim.revisionId === undefined
+    ) {
+      return;
+    }
+    const { agent, revision } = await this.state.read(async (view) => ({
+      agent: await view.agents.findAgent(claim.namespaceId, claim.agentId!),
+      revision: await view.revisions.findRevision(
+        claim.namespaceId,
+        claim.agentId!,
+        claim.revisionId!,
+      ),
+    }));
+    if (
+      revision === undefined ||
+      agent?.activeRevisionId === revision.id ||
+      !holdsNativeHarnessExposure(revision, this.compute)
+    ) {
+      return;
+    }
+    if (!this.harnessExposureWithdrawals.has(revision.id)) {
+      this.harnessExposureWithdrawals.set(revision.id, { revision, attempts: 0, dueAt: 0 });
+    }
   }
 
   private async listHarnessExposureWithdrawals(): Promise<
@@ -4826,6 +4873,17 @@ export class ControllerWorker {
     }
     const compute = this.compute;
     this.passOutcome = committedOutcome;
+    if (
+      committedOutcome === "permanent" &&
+      !activeRevisionChanged &&
+      isCandidateDeployment(claim)
+    ) {
+      try {
+        await this.scheduleFailedCandidateExposureWithdrawal(claim);
+      } catch {
+        // The failure is committed; the next start lists the candidate from its deployment.
+      }
+    }
     if (activated !== undefined) {
       try {
         const current = await this.state.read((view) =>
