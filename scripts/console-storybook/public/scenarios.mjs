@@ -3680,8 +3680,12 @@ export const scenarios = {
     deployed: true,
     slack: true,
     candidateDeploymentStatus: "succeeded",
-    rules: [{ suffix: "/diagnostics", method: "POST", delayMs: 1200 }],
-    actions: [click("Run diagnostics for this version")],
+    rules: [{ suffix: "/diagnostics", method: "POST", delayMs: 3000 }],
+    steps: [
+      "Tab to Run diagnostics for this version, then press Enter or Space.",
+      "Focus moves to “Waiting for diagnostic results…” while the button is disabled. Leave focus there.",
+      "When the checks arrive, focus returns to Run diagnostics. Its description gives the Observed time.",
+    ],
     description:
       "Run diagnostics for v7. The panel shows it is waiting for results, then displays timestamped Slack configuration, authentication, and connectivity checks. The recorded deployment result stays the same.",
   },
@@ -3708,10 +3712,15 @@ export const scenarios = {
         path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/agents/agt_00000000-0000-4000-8000-000000000001/deployments/rev_00000000-0000-4000-8000-000000000007/diagnostics",
         method: "POST",
         status: 503,
+        delayMs: 3000,
         code: "DEPENDENCY_UNAVAILABLE",
       },
     ],
-    actions: [click("Run diagnostics for this version")],
+    steps: [
+      "Tab to Run diagnostics for this version and press Enter. Leave focus on “Waiting for diagnostic results…” until the response arrives.",
+      "Focus returns to Run diagnostics, described by the alert that current-runtime diagnostics are unavailable (a simulated 503).",
+      "Press Enter to run it again. While waiting, press Shift+Tab to move to Refresh record. Focus should stay there when the same alert appears.",
+    ],
     description:
       "A failed on-demand check reports its own error. The viewed v7 deployment record remains succeeded.",
   },
