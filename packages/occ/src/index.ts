@@ -1366,7 +1366,7 @@ function validRepositoryOption(value: unknown): value is RepositoryOption {
     !hasControlCharacter(displayName) &&
     (option?.description === undefined ||
       (isNonEmptyString(option.description) &&
-        option.description.length <= 512 &&
+        Array.from(option.description).length <= 512 &&
         !hasControlCharacter(option.description))) &&
     Array.isArray(allowedProfiles) &&
     allowedProfiles.length >= 1 &&

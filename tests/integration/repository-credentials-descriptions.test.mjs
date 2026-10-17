@@ -249,6 +249,36 @@ test("shutdown cancels an active metadata read and retires its issued token", as
   assert.equal(github.tokenState()[0].revoked, true);
 });
 
+test("repository metadata preserves supplementary Unicode through the character limit", async (t) => {
+  // GitHub permits this 350-character description; its UTF-16 length crosses 512.
+  const description = "a".repeat(187) + "😀".repeat(163);
+  const fixture = await startRegistryCredentialServiceFixture(t, {
+    autoOpen: false,
+    gateway: { listen: "127.0.0.1:0" },
+    repositories: [
+      {
+        repositoryRef: "repo-a",
+        repository: "fixture/repository",
+        repositoryId: "73",
+        description,
+      },
+      {
+        repositoryRef: "repo-b",
+        repository: "fixture/other",
+        repositoryId: "74",
+        description: "😀".repeat(513),
+      },
+    ],
+  });
+  const result = await settled(fixture.config.gateway.controlSocket, {
+    namespaceId: fixture.namespaceId,
+    repositoryRefs: ["repo-a", "repo-b"],
+  });
+  assert.equal(result.descriptions[0].description, description);
+  assert.equal(result.descriptions[0].description.isWellFormed(), true);
+  assert.equal(result.descriptions[1].description, "😀".repeat(512));
+});
+
 test("missing and temporarily unavailable descriptions do not block selection", async (t) => {
   const fixture = await startRegistryCredentialServiceFixture(t, {
     autoOpen: false,

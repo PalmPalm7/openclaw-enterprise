@@ -165,10 +165,10 @@ export function createGitHubRepositoryDescriptions(options: DescriptionOptions) 
             return code <= 0x1f || code === 0x7f ? " " : character;
           })
             .join("")
-            .trim()
-            .slice(0, 512);
-          if (description) {
-            onDescription(description);
+            .trim();
+          const bounded = Array.from(description).slice(0, 512).join("");
+          if (bounded) {
+            onDescription(bounded);
           }
         }
         return { kind: "completed", status: 200 };
