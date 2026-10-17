@@ -575,6 +575,20 @@ export function createShell({ app, pages, route, pageUrl, navigate, loadPage, lo
     renderRows,
     switchNamespace,
     updateNamespaces,
+    // The shown shell's control, outside its page view, that matches one from an earlier
+    // render: the same sidebar link or button, Namespace selector, Refresh, heading or navigation
+    // toggle. A new shell's account menu starts closed, so its items give way to the toggle.
+    matchingControl(node) {
+      const shell = app.querySelector(":scope > .shell");
+      if (!shell) {
+        return null;
+      }
+      if (node.closest(".account")) {
+        return shell.querySelector(".account-toggle");
+      }
+      // The sidebar, toggle and header precede the page view, so their match is found first.
+      return sameControl(node, shell);
+    },
     reset() {
       document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
       menuControls = null;
