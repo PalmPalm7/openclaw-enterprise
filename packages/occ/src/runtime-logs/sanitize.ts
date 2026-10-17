@@ -42,6 +42,7 @@ const WRAPPER_FIELDS: Readonly<Record<string, readonly string[]>> = Object.freez
     "code",
     "providerStatus",
     "providerCode",
+    "responseHeaderMarker",
   ],
   "codex.model_probe": [
     "attempt",

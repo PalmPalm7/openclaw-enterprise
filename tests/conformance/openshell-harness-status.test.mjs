@@ -994,7 +994,8 @@ function runNativeWorkerEntrypoint({ env = {}, upfrontStatus = 3, probeStatus })
       if (specifier === "node:child_process") {
         return {
           execFile() {},
-          // The upfront credential check: exit 3-6 is a 401 (3 unclassified, 4
+          // The upfront credential check: the exit status is a 401's header marker
+          // (0 none, 10 provider-like, 20 openshell-policy, 30 mixed) plus its class (3 unclassified, 4
           // invalid_api_key, 5 missing_api_key, 6 insufficient_permissions). The
           // full probe, when reached, reports `probeStatus` for the model.
           spawnSync(command, args) {
@@ -1046,11 +1047,18 @@ function runNativeWorkerEntrypoint({ env = {}, upfrontStatus = 3, probeStatus })
 const nativeProviderEnv = { APP_TOKEN_SHA: sha256(TOKEN), APP_SERVER_PORT: "18790" };
 
 test("a provider-owned native OpenClaw worker serves its held model-check failure to the transport token holder", async (t) => {
-  for (const [name, upfrontStatus, providerCode] of [
-    ["an unclassified 401", 3, undefined],
-    ["a rejected key", 4, "invalid_api_key"],
-    ["a request that arrived without its credential", 5, "missing_api_key"],
-    ["a key without the endpoint's scope", 6, "insufficient_permissions"],
+  for (const [name, upfrontStatus, providerCode, responseHeaderMarker] of [
+    ["an unclassified 401 without known header names", 3, undefined, "none"],
+    ["a rejected key with provider-like headers", 14, "invalid_api_key", "provider-like"],
+    [
+      "a request that arrived at the provider without its credential",
+      15,
+      "missing_api_key",
+      "provider-like",
+    ],
+    ["a key without the endpoint's scope", 6, "insufficient_permissions", "none"],
+    ["an unclassified 401 stamped X-OpenShell-Policy", 23, undefined, "openshell-policy"],
+    ["a rejected key forwarded with the relay's stamp", 34, "invalid_api_key", "mixed"],
   ]) {
     await t.test(name, () => {
       const { servers, diagnostics, events, connectStarts } = runNativeWorkerEntrypoint({
@@ -1059,11 +1067,13 @@ test("a provider-owned native OpenClaw worker serves its held model-check failur
       });
       assert.equal(connectStarts, 0, "a held failure never starts the node");
       assert.ok(diagnostics.includes("Harness model authentication probe failed."));
-      // The probe event names the HTTP status and a closed-vocabulary code only.
+      // The probe event names the HTTP status, a closed-vocabulary code and the
+      // responder's closed-vocabulary source only.
       const probe = events.find((event) => event.event === "openclaw.model_probe");
       assert.equal(probe.code, "AUTHENTICATION_FAILED");
       assert.equal(probe.providerStatus, 401);
       assert.equal(probe.providerCode, providerCode);
+      assert.equal(probe.responseHeaderMarker, responseHeaderMarker);
       assert.equal(probe.cause, undefined);
       for (const line of diagnostics) {
         assert.ok(!line.includes("fixture-model-key"), "the credential never reaches the log");
