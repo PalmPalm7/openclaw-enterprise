@@ -78,6 +78,87 @@ function observedPodReadiness(runtime, revisionId) {
   return summary;
 }
 
+// The runtime wrapper's fixed event names; the sanitizer keeps only these as `wrapper` lines.
+const wrapperEvents = new Set([
+  "runtime.startup_phase",
+  "openclaw.model_probe",
+  "codex.model_probe",
+  "runtime.workspace_node",
+  "runtime.gateway_settings_overridden",
+]);
+export const runtimeLogSources = Object.freeze(["agent", "sandbox", "gateway"]);
+// One shape per field, each the wrapper's or the Sandbox's own; anything else reads "unknown".
+const fieldShapes = {
+  code: /^[A-Z][A-Z0-9_]{0,63}$/,
+  causeKind: /^[A-Z][A-Z0-9_]{0,63}$/,
+  action: /^[A-Z]{3,16}$/,
+  phase: /^[a-z][a-z0-9-]{0,40}$/,
+  outcome: /^[a-z][a-z0-9-]{0,40}$/,
+  rule_type: /^[a-z][a-z0-9_-]{0,40}$/,
+  level: /^(?:error|warn|info|debug|unknown)$/,
+  source: /^(?:gateway|sandbox)$/,
+};
+const token = (name, value) =>
+  typeof value === "string" && fieldShapes[name].test(value) ? value : "unknown";
+const count = (value) => (Number.isSafeInteger(value) && value >= 0 ? value : undefined);
+
+// Counts of one log source's recent records, the runtime wrapper's events with their fixed
+// fields (container sources) and the Sandbox's policy decisions by action, rule type and
+// origin (the `sandbox` source). Never arbitrary text: a message is printed only when it
+// is a known event name, and every other value is a shape-checked token or a count.
+export function observedRuntimeOutput(logs, revisionId, source) {
+  if (logs?.revisionId !== revisionId || logs.source !== source || !Array.isArray(logs.records)) {
+    return "unavailable";
+  }
+  const records = { line: 0, withheld: 0, gap: 0, other: 0 };
+  const levels = {};
+  const decisions = {};
+  const events = [];
+  for (const record of logs.records) {
+    const type = ["line", "withheld", "gap"].includes(record?.type) ? record.type : "other";
+    records[type] += type === "withheld" ? (count(record.count) ?? 1) : 1;
+    if (type !== "line") {
+      continue;
+    }
+    const level = token("level", record.level);
+    levels[level] = (levels[level] ?? 0) + 1;
+    const fields = record.fields ?? {};
+    if (record.kind === "sandbox" && fields.action !== undefined) {
+      const decision = [
+        token("action", fields.action),
+        token("rule_type", fields.rule_type ?? "none"),
+        token("source", fields.source ?? "unknown"),
+      ].join(":");
+      decisions[decision] = (decisions[decision] ?? 0) + 1;
+    }
+    if (record.kind !== "wrapper" || !wrapperEvents.has(record.message)) {
+      continue;
+    }
+    const event = {
+      time: typeof record.time === "string" ? record.time : null,
+      event: record.message,
+    };
+    for (const name of ["phase", "outcome", "code", "causeKind"]) {
+      if (fields[name] !== undefined) {
+        event[name] = token(name, fields[name]);
+      }
+    }
+    for (const name of ["elapsedMs", "sinceStartMs", "ms", "providerStatus"]) {
+      if (count(fields[name]) !== undefined) {
+        event[name] = fields[name];
+      }
+    }
+    events.push(event);
+  }
+  return {
+    records,
+    levels,
+    truncated: logs.truncated === true,
+    ...(Object.keys(decisions).length === 0 ? {} : { decisions }),
+    events: events.slice(-40),
+  };
+}
+
 export async function failNativeProvisioningDeadline({
   request,
   provisioningPath,
@@ -121,7 +202,7 @@ export async function failNativeProvisioningDeadline({
           provisioned.phase === "handoff" &&
           ["queued", "running"].includes(provisioned.status) &&
           ["queued", "running"].includes(deployment.status) &&
-          code === "REVISION_INCOMPLETE"
+          (code === "REVISION_INCOMPLETE" || code === "WORKSPACE_NODE_PENDING")
         ) {
           observation.runtimeAfterDeadline = "unavailable";
           const runtime = await request(
@@ -131,6 +212,29 @@ export async function failNativeProvisioningDeadline({
             diagnosticSignal,
           );
           observation.runtimeAfterDeadline = observedPodReadiness(runtime, provisioned.revisionId);
+          // Recent runtime output says whether the native worker started and how its model
+          // probe ended (agent), whether the Sandbox let it reach the Gateway (sandbox) and
+          // what the Gateway saw of its node (gateway) (finding 1629). Each source is an
+          // extra: its absence must not hide the readiness observation.
+          observation.runtimeOutput = {};
+          for (const source of runtimeLogSources) {
+            observation.runtimeOutput[source] = "unavailable";
+            try {
+              const logs = await request(
+                "GET",
+                `${deploymentPath}/runtime/logs?source=${source}&tailLines=1000`,
+                undefined,
+                AbortSignal.any([signal, AbortSignal.timeout(5_000)]),
+              );
+              observation.runtimeOutput[source] = observedRuntimeOutput(
+                logs,
+                provisioned.revisionId,
+                source,
+              );
+            } catch {
+              // Reported as unavailable.
+            }
+          }
         }
       }
     } catch {

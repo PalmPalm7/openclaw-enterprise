@@ -6120,11 +6120,21 @@ export class KubernetesComputeDriver implements ComputeDriver {
             return incomplete();
           }
         }
-        if (
-          !(await this.providerHarnessReady(revision, namespace, requirements.labels)) ||
-          !(await this.workspaceNodeReady(revision, namespace))
-        ) {
+        if (!(await this.providerHarnessReady(revision, namespace, requirements.labels))) {
           return incomplete();
+        }
+        if (!(await this.workspaceNodeReady(revision, namespace))) {
+          // The provider's Harness Pod and the Gateway are ready, so only the node's
+          // connection is outstanding: say so, as the Compute-owned Harness path does
+          // (D222). A Gateway still rolling out keeps the unnamed wait.
+          return (await this.gatewayReady(
+            gatewayOwnership,
+            gatewayName,
+            gatewayNamespace,
+            revision.id,
+          ))
+            ? incomplete("WORKSPACE_NODE_PENDING")
+            : incomplete();
         }
         if (credentialContext !== undefined) {
           const statuses = await this.requireCredentialGateway().attachmentStatus({

@@ -1522,12 +1522,31 @@ test("native OpenClaw preparation and activation use only outbound Sandbox enrol
     ["gpt-5"],
   );
   // The provider's observed Pod readiness and enrolled node are independent of provisioning.
+  // Until the provider's Pod is Ready, the wait has no named reason.
+  const podPending = await prepare();
+  assert.equal(podPending.ready, false);
+  assert.equal(podPending.pendingReason, undefined);
   state.providerPod = {
     apiVersion: "v1",
     kind: "Pod",
     metadata: { name: "native-harness", namespace, labels: provisions[0].requirements.labels },
     status: { conditions: [{ type: "Ready", status: "True" }] },
   };
+  // A Ready Pod whose node has not connected names that wait (finding 1629): the
+  // deployment reads WORKSPACE_NODE_PENDING instead of a bare REVISION_INCOMPLETE,
+  // but only while the Gateway is ready too ("Workloads are ready").
+  const gatewayDeployment = read("Deployment", gatewayName);
+  const gatewayStatus = gatewayDeployment.status;
+  delete gatewayDeployment.status;
+  save(gatewayDeployment);
+  const gatewayPending = await prepare();
+  assert.equal(gatewayPending.ready, false);
+  assert.equal(gatewayPending.pendingReason, undefined);
+  gatewayDeployment.status = gatewayStatus;
+  save(gatewayDeployment);
+  const nodePending = await prepare();
+  assert.equal(nodePending.ready, false);
+  assert.equal(nodePending.pendingReason, "WORKSPACE_NODE_PENDING");
   state.connected = true;
   assert.equal((await prepare()).ready, true);
   assert.deepEqual(read("NetworkPolicy", stale.metadata.name), stale);
