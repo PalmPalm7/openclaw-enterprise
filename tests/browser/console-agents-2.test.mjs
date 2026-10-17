@@ -958,6 +958,201 @@ test("Dedicated Agent creation names a full Namespace Pod quota while it waits",
   }
 });
 
+// Since #2744 a job past handoff names its first deployment's wait, but Create Agent showed one
+// "Provisioning Agent…" line until the job ended, about 48 s on oce-dogfood-b (finding 1690). It
+// now adds the wait's sentence, the one the deployment status shows. A fresh deployment read's
+// quota wait comes first, a refused read clears the detail, and an unavailable one keeps the
+// job's newer wait. A member who can't read the deployment gets only the job's own pending code,
+// which adds nothing, so the line stays as is.
+test("Dedicated Agent creation names the first deployment's wait while it provisions", async (t) => {
+  const runtime = "Waiting for the runtime to become ready.";
+  const node = "Workloads are ready; waiting for the workspace node to connect to the Gateway.";
+  const quotaFull =
+    "The Namespace's Pod quota is full. Stop or delete an Agent, or ask an administrator to raise the quota.";
+  const stopping =
+    "The Agent was stopped; its gateway is finishing active work before the stop completes.";
+  for (const reader of ["deployment reader", "member without deployment access"]) {
+    const fixture = await createConsoleAppFixture(t);
+    await fixture.bootstrap();
+    const namespace = await fixture.createNamespace(`Named wait ${reader}`, { ready: true });
+    const { page } = await newPage(t, fixture);
+    await routeDedicatedProvisioning(page, fixture, namespace);
+    const updatedAt = new Date().toISOString();
+    const meta = { requestId: "req_00000000-0000-4000-8000-000000000001" };
+    const url = `/namespaces/${namespace.id}/agents/provision/work_named`;
+    const agentId = "agt_00000000-0000-4000-8000-00000000a690";
+    const revisionId = "rev_00000000-0000-4000-8000-00000000a690";
+    const job = (status, extra = {}) => ({
+      workId: "work_named",
+      status,
+      phase: "configuration",
+      attemptCount: 1,
+      updatedAt,
+      url,
+      ...extra,
+    });
+    const handedOff = { phase: "handoff", agentId, configurationId: "cfg_named", revisionId };
+    const pending = {
+      code: "PROVISIONING_DEPLOYMENT_PENDING",
+      message: "Waiting for the initial deployment to complete.",
+    };
+    const waiting = (lastAttempt) => ({
+      ...handedOff,
+      progress: {
+        phase: "deployment",
+        lastAttempt: lastAttempt && { at: updatedAt, ...lastAttempt },
+      },
+    });
+    const deploymentReader = reader === "deployment reader";
+    let submitted = false;
+    await page.route(`**/namespaces/${namespace.id}/agents/provision`, (route) => {
+      submitted = true;
+      return route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({ data: { provisioning: job("queued") }, meta }),
+      });
+    });
+    // Each poll: the job's named wait, then what the deployment read that follows it answers.
+    // The job hands off its first deployment, which waits for the runtime, the Pod quota and the
+    // workspace node while that read is briefly unavailable (503). Then the job still names the
+    // runtime wait while the read already reports the Pod quota, and then the reader loses access
+    // (403). A stop's gateway drain follows, then no recorded wait, and the job fails. The quota
+    // and the stop stand alone. A member can't read the deployment and gets the job's own code.
+    const runtimeWait = { code: "REVISION_INCOMPLETE", message: runtime };
+    const quotaWait = { code: "NAMESPACE_POD_QUOTA_EXCEEDED", message: quotaFull };
+    const stopWait = { code: "AGENT_STOP_YIELDED", message: stopping };
+    const polls = deploymentReader
+      ? [
+          [runtimeWait, runtimeWait],
+          [quotaWait, quotaWait],
+          [{ code: "WORKSPACE_NODE_PENDING", message: node }, 503],
+          [runtimeWait, quotaWait],
+          [runtimeWait, 403],
+          [stopWait, stopWait],
+        ]
+      : Array.from({ length: 6 }, () => [pending, 403]);
+    const reads = [
+      job("running"),
+      job("queued", waiting(null)),
+      ...polls.map(([wait]) => job("queued", waiting(wait))),
+      job("queued", waiting(null)),
+      job("failed", {
+        ...handedOff,
+        error: {
+          code: "PROVISIONING_DEPENDENCY_UNAVAILABLE",
+          message: "Agent provisioning could not complete.",
+        },
+      }),
+    ];
+    let read = 0;
+    await page.route(`**/namespaces/${namespace.id}/agents/provision/work_named`, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ data: reads[Math.min(read++, reads.length - 1)], meta }),
+      }),
+    );
+    await page.route(
+      `**/namespaces/${namespace.id}/agents/${agentId}/deployments/${revisionId}`,
+      (route) => {
+        // Job reads 2 to 7 carry the polls; the first handed-off one and the last record no wait.
+        const answer = deploymentReader ? (polls[read - 3]?.[1] ?? null) : 403;
+        if (typeof answer === "number") {
+          return route.fulfill({
+            status: answer,
+            contentType: "application/json",
+            body: JSON.stringify({
+              error:
+                answer === 503
+                  ? { code: "SERVICE_UNAVAILABLE", message: "Service unavailable." }
+                  : { code: "FORBIDDEN", message: "Access denied." },
+              meta,
+            }),
+          });
+        }
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            data: {
+              deploymentId: revisionId,
+              namespaceId: namespace.id,
+              agentId,
+              status: "queued",
+              error: null,
+              warnings: [],
+              progress: answer && {
+                lastAttempt: { at: updatedAt, ...answer },
+                nextAttemptAt: updatedAt,
+              },
+            },
+            meta,
+          }),
+        });
+      },
+    );
+
+    await trackSettledFetches(page);
+    await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
+    await page.getByRole("heading", { name: "Create Agent" }).waitFor();
+    await page.getByRole("button", { name: "Start without Preset" }).click();
+    await page.getByLabel("Agent name").fill("Named wait");
+    await page.getByLabel("Authentication method").selectOption("codex_pat");
+    await createModelCredentialSecret(page, "model-secret-value");
+    await page.getByLabel("Model", { exact: true }).selectOption("gpt-6-sol");
+    await page.evaluate(() => {
+      globalThis.provisioningWrites = [];
+      new globalThis.MutationObserver((records) => {
+        for (const record of records) {
+          if (record.target.nodeType === 1 && record.target.getAttribute("role") === "status") {
+            const text = [...record.addedNodes].map((node) => node.textContent).join("");
+            if (text.startsWith("Provisioning") || text.startsWith("The ")) {
+              globalThis.provisioningWrites.push(text);
+            }
+          }
+        }
+      }).observe(globalThis.document.body, { childList: true, subtree: true });
+    });
+    const start = Date.now();
+    await page.clock.install({ time: start });
+    await page.clock.pauseAt(start + 1_000);
+    await page.getByRole("button", { name: "Create Agent" }).click();
+    // Advance the clock only once the page has handled this poll's reads.
+    for (let poll = 0; poll < reads.length; poll += 1) {
+      await waitForCondition(() => submitted && read === poll, `job read ${poll} for a ${reader}`);
+      await waitForIdleFetches(page);
+      await page.clock.runFor(1_000);
+    }
+    await page.getByText("Provisioning failed.", { exact: true }).waitFor();
+    assert.equal(read, reads.length);
+    assert.deepEqual(
+      await page.evaluate(() => globalThis.provisioningWrites),
+      deploymentReader
+        ? [
+            "Provisioning request accepted.",
+            "Provisioning queued…",
+            "Provisioning Agent…",
+            `Provisioning Agent… ${runtime}`,
+            quotaFull,
+            `Provisioning Agent… ${node}`,
+            quotaFull,
+            "Provisioning Agent…",
+            stopping,
+            "Provisioning Agent…",
+            "Provisioning failed.",
+          ]
+        : [
+            "Provisioning request accepted.",
+            "Provisioning queued…",
+            "Provisioning Agent…",
+            "Provisioning failed.",
+          ],
+      `provisioning lines for a ${reader}`,
+    );
+  }
+});
+
 // A deployment read is optional. Even an unfinished response body gets only the time until
 // the next provisioning poll; a second full interval after cancelling it would also be wrong.
 for (const [name, leave] of [
