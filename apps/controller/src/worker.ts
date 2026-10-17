@@ -4502,6 +4502,8 @@ export class ControllerWorker {
         : await this.refusedStopRecheckMs(claim, resolved.refusedStopMs ?? 0);
     let activated: Readonly<AgentRevision> | undefined;
     let stoppedCandidate: Readonly<AgentRevision> | undefined;
+    // Set when the pointer commit lost a race: the pass then commits a retry, not `resolved`.
+    let activeRevisionChanged = false;
     let committedOutcome: WorkOutcome =
       resolved.outcome === "retry" && claim.attemptCount >= this.maxAttempts
         ? "permanent"
@@ -4543,6 +4545,7 @@ export class ControllerWorker {
         ) {
           await queue.retry(claim, { code: "ACTIVE_REVISION_CHANGED" });
           committedOutcome = claim.attemptCount >= this.maxAttempts ? "permanent" : "retry";
+          activeRevisionChanged = true;
           return;
         }
         if (current.desiredRuntimeState !== "running") {
@@ -4558,6 +4561,7 @@ export class ControllerWorker {
         if (activeAgent === undefined) {
           await queue.retry(claim, { code: "ACTIVE_REVISION_CHANGED" });
           committedOutcome = claim.attemptCount >= this.maxAttempts ? "permanent" : "retry";
+          activeRevisionChanged = true;
           return;
         }
         activated = resolved.revision;
@@ -4696,15 +4700,20 @@ export class ControllerWorker {
     } else {
       stopYields = this.stopYields.count(claim.idempotencyKey);
     }
+    // A lost pointer race reports the retry this pass committed, not the resolved success
+    // (finding 1611).
+    const reported = activeRevisionChanged
+      ? { outcome: "retry" as const, code: "ACTIVE_REVISION_CHANGED" }
+      : resolved;
     this.emit({
       event: "worker.completed",
       ...workLogFields(claim),
       namespaceId: claim.namespaceId,
       agentId: claim.agentId,
       revisionId: claim.revisionId,
-      result: resolved.outcome,
-      outcome: resolved.outcome,
-      code: resolved.code,
+      result: reported.outcome,
+      outcome: reported.outcome,
+      code: reported.code,
       ...failureLogFields,
       ...this.deployTimingFields(claim),
       ...stopYieldsField(stopYields),
@@ -5072,6 +5081,19 @@ export class ControllerWorker {
     this.passOutcome = result.outcome;
     if (!completed) {
       this.passOutcome = claim.attemptCount >= this.maxAttempts ? "permanent" : "retry";
+      // Like the pointer commit's lost race, this pass committed a retry (finding 1611).
+      this.emit({
+        event: "worker.completed",
+        ...workLogFields(claim),
+        namespaceId: claim.namespaceId,
+        agentId: claim.agentId,
+        revisionId: claim.revisionId,
+        result: "retry",
+        outcome: "retry",
+        code: "ACTIVE_REVISION_CHANGED",
+        ...this.deployTimingFields(claim),
+        ...stopYieldsField(this.stopYields.count(claim.idempotencyKey)),
+      });
       return;
     }
     // Original admission time survives queue waits and retries. Maintenance and
