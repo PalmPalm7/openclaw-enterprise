@@ -1,7 +1,7 @@
 ---
 created: 2026-09-08
-updated: 2026-10-15
-last_updated_session: authoring-run/41e4bb7a-c8eb-4332-b1f9-07fb8e234f63
+updated: 2026-10-17
+last_updated_session: authoring-run/629826fb-b521-49bb-865a-dbc1b5c975a5
 ---
 
 # Agent Plugin Deployment Flow
@@ -95,6 +95,12 @@ unsupported releases stay unavailable. Curated catalogs verify neither tools nor
 Bounded hosted reads forbid redirects. Responses are `no-store`, reject credential
 echoes, and omit upstream errors/artifacts and Driver links/setup guidance.
 Connections stay unverified. HTTPS logos omit referrers; initials are the default.
+
+Optional `CodexPluginDriver.listCatalog` uses
+[`NativeCodexPluginCatalogReader`](../../apps/controller/src/drivers/plugin/stdio-catalog-reader.ts)
+with a configured executable and Codex home. It reads app-server JSON-RPC stdout.
+Invalid JSON or non-object envelopes reject with `NotImplementedError`;
+bounded teardown stops the child. HTTP discovery does not call this reader.
 
 ### 1. Validate desired state under exact-Agent authority
 
@@ -342,6 +348,9 @@ deadline.
 
 ## Changelog
 
+- 2026-10-17 06:05: Preserve OAuth discovery changes while integrating the native reader fix. (authoring-run/629826fb-b521-49bb-865a-dbc1b5c975a5 - 23965d64cc2824f0c5a2b5d704f767fead13f11b)
+
+- 2026-10-17 00:10: Contain non-object native catalog envelopes in the discovery error path. (authoring-run/3d8efdc8-6da6-4cf9-99f7-adebd5e5649d - 42fb0a90337209e28318765c1b537bc4f3623506)
 - 2026-10-15 22:26: Reconcile main and OpenShell OAuth in the accompanying merge. (authoring-run/41e4bb7a-c8eb-4332-b1f9-07fb8e234f63 - b747cf5b6402ad36ce9f1ae6dbed08928ddcf3dc)
 
 - 2026-10-15 04:39: Grant read-only access to bundled Codex system skills. (authoring-run/97a67c3a-0aaa-4d59-bccf-19183079b169 - 00bbc7cd976ab7be317ce1e0a9d36ad72ce10567)
@@ -371,18 +380,6 @@ deadline.
 - 2026-10-07 17:42: Replace login-bundle discovery with warm CredentialSource token callbacks. (01a0e5ec-d802-7800-9eb6-8022c1ac0d06 - da984340a)
 - 2026-10-07 19:30: Pass the admitted model to native Codex before reviewer validation. (authoring-run/bc793557-585a-4c1a-9463-b2c55682ea02 - b1be0e0602b9db1035a689ca2a4ac4982f6d0b3b)
 
-- 2026-10-04 05:00: Recheck Create Agent discovery grants after the Secret read. (bughunt-11)
-
-- 2026-10-01 00:57: Reconcile peer recovery with current runtime. (codex/01a0b0e4-839a-71b3-9ec1-3b1000b5d06a - e57e777238104b1de0d3bee5c6c631722c4af575)
-
 - 2026-09-30 13:32: Clarify readiness and routing propagation. (codex/01a0b0e4-839a-71b3-9ec1-3b1000b5d06a - a0ca6376)
-
-- 2026-09-30 02:10: Recheck the peer before replacement readiness. (authoring-run/fc09b5f8-3fc8-4144-ac80-8bfd8ef24f52 - ed69e6eee87ca004d2970069e8e18cf4cce29a32)
-
-- 2026-09-30 00:33: Propagate Gateway exits while awaiting peer recovery. (authoring-run/bf3b8146-9d72-42a4-84e5-2293581c890c - 0d72f6a4e4e3003d457c4498e81e7de414f85649)
-
-- 2026-09-28 21:26: Batch Codex metadata reads; preserve ordered writes and verification. (authoring-run/7c8bff1b-a2d1-48f6-a996-1be6a06719fa - 8352c0932bcbde43e88b44c6975496ca5431ff55)
-
-- 2026-09-28 10:46: Materialize inherited app policy; native proof pending. (codex/01a0cf72-6985-7712-ba92-d8cc32470f24 - 44ed2405)
 
 [Agent plugin deployment documentation history](agent-plugins/history.md) preserves the older dated entries.

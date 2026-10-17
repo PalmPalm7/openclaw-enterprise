@@ -696,6 +696,31 @@ setInterval(() => {}, 1_000);
   assert.equal(alive, false, "the aborted Codex app-server must not outlive the request");
 });
 
+test("Codex native catalog rejects a non-object response without escaping discovery", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "oce-codex-catalog-shape-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const executable = join(directory, "codex-fixture.mjs");
+  // The configured peer writes valid JSON with an invalid JSON-RPC envelope.
+  // Exercise the public Driver and real OS pipes, not a substituted reader.
+  await writeFile(
+    executable,
+    `#!/usr/bin/env node
+process.stdin.once("data", () => process.stdout.write("null\\n"));
+`,
+  );
+  await chmod(executable, 0o755);
+  const driver = new CodexPluginDriver({
+    codexExecutable: executable,
+    codexHome: directory,
+    requestTimeoutMs: 1_000,
+  });
+  await assert.rejects(driver.listCatalog(context("dedicated")), (error) => {
+    assert.ok(error instanceof NotImplementedError);
+    assert.match(error.message, /returned an invalid JSON-RPC response/);
+    return true;
+  });
+});
+
 test("Codex startup default-denies plugins", () => {
   const empty = codexRuntimeArtifact({}, []);
   assert.equal(empty.kind, "codex");

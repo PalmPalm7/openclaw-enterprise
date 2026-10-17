@@ -183,14 +183,17 @@ export class NativeCodexPluginCatalogReader implements CodexPluginCatalogReader 
       });
 
       createInterface({ input: child.stdout }).on("line", (line) => {
-        let message: Record<string, unknown>;
+        let message: Record<string, unknown> | undefined;
         try {
-          message = JSON.parse(line) as Record<string, unknown>;
+          message = asRecord(JSON.parse(line));
         } catch {
+          // Invalid JSON and non-object envelopes share the discovery failure below.
+        }
+        if (message === undefined) {
           finish(
             new NotImplementedError(
               "codex-plugin-catalog-discovery",
-              "Codex plugin catalog discovery returned invalid JSON.",
+              "Codex plugin catalog discovery returned an invalid JSON-RPC response.",
             ),
           );
           return;
