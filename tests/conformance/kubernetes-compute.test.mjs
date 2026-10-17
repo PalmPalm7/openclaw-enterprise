@@ -16335,7 +16335,7 @@ function workspaceSetupFixture(
                         name: "initialize-workspace",
                         state: {
                           terminated: {
-                            exitCode: 1,
+                            exitCode: state.initializerExitCode ?? 1,
                             finishedAt: "2026-09-22T00:00:00Z",
                             message: "private-content-must-not-escape",
                           },
@@ -17316,6 +17316,17 @@ for (const embedded of [true, false]) {
       code: "WORKSPACE_SETUP_FAILED",
       checkedAt: "2026-09-22T00:00:00Z",
     });
+    // The kubelet restarts the init container, which may pass: the wait is named (finding 1677).
+    assert.equal(result.pendingReason, "WORKSPACE_SETUP_RETRYING");
+    // The setup runner refused the workspace, which every restart repeats: no wait to name.
+    fixture.state.initializerExitCode = 2;
+    const refused = await fixture.driver.prepareRevision(fixture.revision, fixture.context);
+    assert.equal(refused.ready, false);
+    assert.deepEqual(refused.runtimeFailure, {
+      ...result.runtimeFailure,
+      code: "WORKSPACE_SETUP_REFUSED",
+    });
+    assert.equal(Object.hasOwn(refused, "pendingReason"), false);
     const secret = [...fixture.objects.values()].find(
       ({ kind, metadata }) => kind === "Secret" && metadata.name.startsWith("workspace-setup-"),
     );
@@ -17328,6 +17339,8 @@ for (const embedded of [true, false]) {
     for (const scenario of [
       { finishedAt: new Date("2026-09-22T00:00:00Z"), waiting: false },
       { finishedAt: new Date("2026-09-22T00:00:00Z"), waiting: true },
+      // A refusal in back-off is read from the last failed instance too (finding 1677).
+      { finishedAt: new Date("2026-09-22T00:00:00Z"), waiting: true, exitCode: 2 },
       { finishedAt: new Date(Number.NaN) },
       { finishedAt: null },
       { finishedAt: undefined },
@@ -17340,6 +17353,7 @@ for (const embedded of [true, false]) {
     ]) {
       const fixture = workspaceSetupFixture(embedded);
       fixture.state.failedInitializer = true;
+      fixture.state.initializerExitCode = scenario.exitCode;
       const clients = await fixture.driver.apiClients;
       const list = clients.core.listNamespacedPod;
       // The shipped SDK decodes the API's finishedAt into Date. A waiting
@@ -17363,7 +17377,10 @@ for (const embedded of [true, false]) {
       const result = await fixture.driver.prepareRevision(fixture.revision, fixture.context);
       const after = Date.now();
       assert.equal(result.ready, false);
-      assert.equal(result.runtimeFailure.code, "WORKSPACE_SETUP_FAILED");
+      assert.equal(
+        result.runtimeFailure.code,
+        scenario.exitCode === 2 ? "WORKSPACE_SETUP_REFUSED" : "WORKSPACE_SETUP_FAILED",
+      );
       const checkedAt = Date.parse(result.runtimeFailure.checkedAt);
       if (scenario.expected !== undefined) {
         assert.equal(result.runtimeFailure.checkedAt, scenario.expected);
