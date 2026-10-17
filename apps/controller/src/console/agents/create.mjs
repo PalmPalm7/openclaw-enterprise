@@ -193,7 +193,8 @@ async function cancelledAgentState(request, namespaceId, agentId) {
 
 // First-deployment waits that someone must act on (finding 1617): the deployment's own fixed
 // sentence replaces the bare provisioning line. The deployment read needs read access to the
-// Agent; a reader without it, or any other wait, keeps the bare line.
+// Agent. Clear the reason if the deployment is no longer readable or names a different wait;
+// keep it through a cancelled read or temporary outage (finding 1637).
 const NAMED_DEPLOYMENT_WAITS = new Set(["NAMESPACE_POD_QUOTA_EXCEEDED"]);
 // An outage, unlike the Installation's shape, needs no administrator change (finding 1624). Agent
 // save and deploy answer 503 for every harness until the selected Sandbox Driver returns.
@@ -207,7 +208,7 @@ async function namedDeploymentWait(request, namespaceId, job, signal) {
     typeof job.revisionId !== "string" ||
     !job.revisionId
   ) {
-    return undefined;
+    return null;
   }
   try {
     const deployment = await request(
@@ -219,9 +220,9 @@ async function namedDeploymentWait(request, namespaceId, job, signal) {
       typeof attempt.message === "string" &&
       attempt.message
       ? attempt.message
-      : undefined;
-  } catch {
-    return undefined;
+      : null;
+  } catch (error) {
+    return [401, 403, 404].includes(error.status) ? null : undefined;
   }
 }
 
@@ -231,6 +232,9 @@ async function waitForProvisioning({ request, status, first, namespaceId, isCurr
   // A started job goes back to queued between retries. Keep one label once it has started,
   // and write it only when it changes, since this rereads every second (finding 1424).
   let started = false;
+  // The last named wait stays shown until a later deployment read names another or none: a read
+  // cut off at the next poll would otherwise flip the line back to the bare text (finding 1637).
+  let named = null;
   while (current?.status === "queued" || current?.status === "running") {
     if (typeof current.url !== "string" || !current.url) {
       throw new Error("Provisioning status URL is unavailable.");
@@ -240,11 +244,11 @@ async function waitForProvisioning({ request, status, first, namespaceId, isCurr
     // even if only its headers arrived; the provisioning job remains the source of truth.
     const detail = new AbortController();
     const nextPoll = wait(1_000).then(() => detail.abort());
-    setText(
-      status,
-      (await namedDeploymentWait(request, namespaceId, current, detail.signal)) ??
-        provisioningStatusText(started ? "running" : current.status),
-    );
+    const read = await namedDeploymentWait(request, namespaceId, current, detail.signal);
+    if (read !== undefined) {
+      named = read;
+    }
+    setText(status, named ?? provisioningStatusText(started ? "running" : current.status));
     await nextPoll;
     if (!isCurrent()) {
       throw new DOMException("View closed", "AbortError");
