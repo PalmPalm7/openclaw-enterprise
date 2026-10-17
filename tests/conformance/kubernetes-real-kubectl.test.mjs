@@ -5,7 +5,7 @@ import { createServer } from "node:net";
 import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
@@ -24,6 +24,7 @@ import {
   retryKubectlRead,
   retryKubectlWrite,
   teardownStepLimitMs,
+  withBoundedTeardown,
   withinDiagnosticDeadline,
 } from "../helpers/kubernetes-real.mjs";
 import { refusingPort } from "../helpers/available-port.mjs";
@@ -351,6 +352,225 @@ test(
       exited.stderr,
       /teardown: exiting in 50 ms; abandoned cleanups workerStop registered at openshell-kubernetes-real\.mjs:\d+/,
     );
+  },
+);
+
+test("a helper's bounded teardown reuses its caller's and never nests a second one", () => {
+  const testContext = new RecordingContext();
+  const context = withBoundedTeardown(testContext);
+  assert.equal(testContext.hooks.length, 1, "a raw node:test context gets one bounded hook");
+  assert.equal(withBoundedTeardown(context), context);
+  const { context: callers } = boundedTeardown(new RecordingContext());
+  assert.equal(withBoundedTeardown(callers), callers);
+  assert.equal(testContext.hooks.length, 1);
+});
+
+test(
+  "the production topology's cleanups all run when its worker stop rejects",
+  { timeout: 20_000 },
+  async () => {
+    // Finding 1711: the topology's own cleanup registration, in a real node:test process given a
+    // raw context, as the routing and native admin tests pass it. The worker stop rejects at once;
+    // every later cleanup must still be attempted, the failure kept, and the file must exit by
+    // itself (the production app's close releases what holds it). Registering them as one
+    // cleanup, as before, would attempt only the gateway forward and the worker stop.
+    const topologyHelper = new URL("../helpers/harness-topology-k3d-real.mjs", import.meta.url)
+      .href;
+    const kubernetesHelper = new URL("../helpers/kubernetes-real.mjs", import.meta.url).href;
+    const script = `
+      import test from "node:test";
+      import { withBoundedTeardown } from ${JSON.stringify(kubernetesHelper)};
+      import {
+        productionTopologyCleanupOrder,
+        registerProductionTopologyCleanups,
+      } from ${JSON.stringify(topologyHelper)};
+      const attempt = (name) => process.stdout.write("attempted " + name + "\\n");
+      test("topology", async (testContext) => {
+        const context = withBoundedTeardown(testContext, { label: "production topology teardown" });
+        const held = setInterval(() => {}, 50);
+        const operations = Object.fromEntries(
+          productionTopologyCleanupOrder.map((name) => [name, () => attempt(name)]),
+        );
+        operations.worker = async () => {
+          attempt("worker");
+          throw new Error("worker stop failed");
+        };
+        operations.productionApp = () => {
+          attempt("productionApp");
+          clearInterval(held);
+        };
+        registerProductionTopologyCleanups(context, operations);
+      });
+    `;
+    // Run it as its own node:test root, not as a child reporting to this runner.
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    const started = Date.now();
+    const exited = await execute(process.execPath, ["--input-type=module", "-e", script], {
+      env,
+      timeout: 15_000,
+    }).then(
+      () => ({ code: 0, stdout: "", stderr: "" }),
+      (error) => error,
+    );
+    assert.ok(Date.now() - started < 10_000, "the file exited soon after its teardown");
+    assert.notEqual(exited.killed, true, "the file exited on its own");
+    assert.equal(exited.code, 1);
+    assert.deepEqual(exited.stdout.match(/^attempted .+$/gm), [
+      "attempted gatewayForward",
+      "attempted worker",
+      "attempted productionApp",
+      "attempted observerPool",
+      "attempted postgresNetwork",
+      "attempted gatewayRuntimeNamespace",
+      "attempted placementNamespace",
+      "attempted temporaryDirectory",
+    ]);
+    assert.match(
+      exited.stderr,
+      /production topology teardown: cleanup worker registered at harness-topology-k3d-real\.mjs:\d+ failed: worker stop failed/,
+    );
+    // The test passed; node:test fails it with the worker's own error, retained to the end.
+    assert.match(
+      exited.stdout,
+      /cleanup worker registered at harness-topology-k3d-real\.mjs:\d+: worker stop failed/,
+    );
+  },
+);
+
+// Stands in for tests/helpers/harness-topology-k3d-real.mjs. Its arrangeProductionTopology
+// registers cleanups in the helper's order: the platform Namespace delete (which removes the
+// worker's ServiceAccount) first, the cluster roles next, and the worker stop last. The delete
+// fails, and the worker's poll keeps the file alive until its stop runs.
+const topologyStandIn = (exported) => `
+  import { appendFileSync } from "node:fs";
+  const record = (line) => appendFileSync(process.env.TOPOLOGY_TEARDOWN_RECORD, line + "\\n");
+  export async function arrangeProductionTopology(context) {
+    const name = context.name;
+    let poll = setInterval(() => {}, 50);
+    context.after(() => {
+      record(name + "\\tplatform Namespace delete with the worker " + (poll ? "running" : "stopped"));
+      throw new Error("platform Namespace deletion timed out");
+    });
+    context.after(() => record(name + "\\tcluster roles delete"));
+    context.after(() => {
+      record(name + "\\tworker stop");
+      clearInterval(poll);
+      poll = undefined;
+    });
+    throw new Error("topology setup failed");
+  }
+  // The live Slack proof checks both bots before it arranges the topology.
+  export async function slackApi(method, token) {
+    return method === "auth.test"
+      ? { team_id: "T0", user_id: token }
+      : { channel: { is_member: true } };
+  }
+  ${exported
+    .filter((name) => !["arrangeProductionTopology", "slackApi"].includes(name))
+    .map((name) =>
+      name.startsWith("requires")
+        ? `export const ${name} = {};`
+        : `export function ${name}() { throw new Error("not reached"); }`,
+    )
+    .join("\n")}
+`;
+
+test(
+  "every production topology test stops its worker before the platform Namespace delete",
+  { timeout: 60_000 },
+  async (t) => {
+    // Finding 1711 in the topology tests: node:test would run the platform Namespace delete first,
+    // under a running worker, and skip the worker stop once the delete failed. Each file runs with
+    // the helper replaced by a stand-in; a test that hands arrangeProductionTopology its own
+    // node:test context records the delete first, and its file never exits.
+    const directory = await mkdtemp(join(tmpdir(), "occ-topology-teardown-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const helper = new URL("../helpers/harness-topology-k3d-real.mjs", import.meta.url);
+    const exportList = /^export \{([^}]+)\};$/m.exec(await readFile(helper, "utf8"));
+    assert.ok(exportList, "the topology helper ends with one export { ... } list");
+    const exported = exportList[1]
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean);
+    assert.ok(exported.includes("arrangeProductionTopology"));
+    const standIn = join(directory, "topology.mjs");
+    await writeFile(standIn, topologyStandIn(exported));
+    const hooks = join(directory, "hooks.mjs");
+    await writeFile(
+      hooks,
+      `import { registerHooks } from "node:module";
+      registerHooks({
+        resolve(specifier, context, nextResolve) {
+          const resolved = nextResolve(specifier, context);
+          return resolved.url === ${JSON.stringify(helper.href)}
+            ? { url: ${JSON.stringify(pathToFileURL(standIn).href)}, shortCircuit: true }
+            : resolved;
+        },
+      });`,
+    );
+    // Tests per file: each must reach arrangeProductionTopology, so a new test bumps its count.
+    const files = {
+      "harness-topology-k3d-real.test.mjs": 6,
+      "harness-topology-k3d-otel-real.test.mjs": 2,
+      "harness-topology-k3d-slack-real.test.mjs": 1,
+    };
+    // Settle every file before asserting, so no child still writes once the directory is removed.
+    const results = await Promise.all(
+      Object.entries(files).map(async ([file, tests]) => {
+        const record = join(directory, `${file}.log`);
+        const env = {
+          ...process.env,
+          TOPOLOGY_TEARDOWN_RECORD: record,
+          OCC_TEST_SKILL_SOURCE_LIFECYCLE: "1",
+          OCC_TEST_SLACK_PROXY_URL: "http://127.0.0.1:3128",
+          OCC_TEST_SLACK_CHANNEL_ID: "C0",
+          OCC_TEST_SLACK_SENDER_BOT_TOKEN: "xoxb-sender",
+          SLACK_APP_TOKEN: "xapp-app",
+          SLACK_BOT_TOKEN: "xoxb-gateway",
+        };
+        // Run each file as its own node:test root, not as a child reporting to this runner.
+        delete env.NODE_TEST_CONTEXT;
+        const exited = await execute(
+          process.execPath,
+          [
+            "--import",
+            pathToFileURL(hooks).href,
+            fileURLToPath(new URL(`../integration/${file}`, import.meta.url)),
+          ],
+          { env, timeout: 15_000 },
+        ).then(
+          () => ({ code: 0, stdout: "", stderr: "" }),
+          (error) => error,
+        );
+        return { file, tests, exited, record: await readFile(record, "utf8").catch(() => "") };
+      }),
+    );
+    for (const { file, tests, exited, record } of results) {
+      const steps = record
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => line.split("\t"));
+      const names = [...new Set(steps.map(([name]) => name))];
+      assert.equal(
+        names.length,
+        tests,
+        `${file} arranged a topology in every test\n${exited.stdout}\n${exited.stderr}`,
+      );
+      for (const name of names) {
+        assert.deepEqual(
+          steps.filter(([test]) => test === name).map(([, step]) => step),
+          [
+            "worker stop",
+            "cluster roles delete",
+            "platform Namespace delete with the worker stopped",
+          ],
+          `${file}: ${name}`,
+        );
+      }
+      assert.notEqual(exited.killed, true, `${file} exited on its own`);
+      assert.equal(exited.code, 1, `${file} fails its stand-in topology`);
+    }
   },
 );
 
