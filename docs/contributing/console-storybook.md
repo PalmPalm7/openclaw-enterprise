@@ -273,11 +273,9 @@ under each step, not its number.
 In **Deployment outcome unknown**, press Enter on **Deploy new version**.
 “Deploying…” clears, “Outcome unknown” takes focus, and Deploy stays disabled.
 
-From **New version failed** or **Failed deployment logs from draft**, open v7
-Logs, check output or access denial, then go Back. In **Runtime status and logs
-for v7**, check source, instance, debug, fields, Follow, and filters. At 390px,
-the selected tab and log rows stay visible through direct links and Back/Forward.
-These are fixture responses, not live reads.
+Open v7 Logs from **New version failed**, then go Back. At 390px, the selected
+tab and log rows stay visible. [Lose and regain log or Pod access](../../scripts/console-storybook/runtime-access-workflow.md)
+to check Follow, Download, and permission changes. These stories use simulated responses.
 
 Unreadable Configuration does not hide version metadata. Check the [draft and
 revision banners](../../scripts/console-storybook/unreadable-configuration-workflow.md)
