@@ -1223,6 +1223,146 @@ test("rate limits keep Follow and status automatic, but not a download made whil
   assert.equal(counts.download, 1);
 });
 
+// A rate-limited Refresh logs emptied the pane before its read, so only the error remained, and
+// "Try again in 1 second" stayed long after that second had passed (finding 1715).
+test("a rate-limited Refresh logs keeps the loaded lines and says when to try again", async (t) => {
+  const page = await logsBeforeRateLimit(t);
+  const log = page.getByRole("log", { name: "Runtime log output" });
+  const logError = page.locator(".log-error");
+  const outputStatus = page.locator(".log-output-status");
+  const shownStatus = await outputStatus.textContent();
+  assert.match(shownStatus, /^Showing /u);
+  let answer = rateLimitedResponse(7);
+  await page.route("**/runtime/logs?*", (route) =>
+    answer ? route.fulfill(answer) : route.fallback(),
+  );
+
+  await page.getByRole("button", { name: "Refresh logs" }).click();
+  await waitForIdleFetches(page);
+  assert.equal(
+    await logError.textContent(),
+    `Too many requests. Try again in 7 seconds. Request ID: ${rateLimitRequestId}`,
+  );
+  assert.equal(await log.locator(".log-row").count(), 1);
+  await log.getByText("output before the rate limit").waitFor();
+  assert.equal(await outputStatus.textContent(), shownStatus);
+  await page.clock.runFor(6_999);
+  assert.match(await logError.textContent(), /Try again in 7 seconds\./u);
+  await page.clock.runFor(1);
+  assert.equal(
+    await logError.textContent(),
+    `Too many requests. You can try again now. Request ID: ${rateLimitRequestId}`,
+  );
+
+  // The next refresh replaces the kept lines with its own page.
+  answer = null;
+  await page.getByRole("button", { name: "Refresh logs" }).click();
+  await waitForIdleFetches(page);
+  assert.equal(await logError.isHidden(), true);
+  assert.equal(await log.locator(".log-row").count(), 1);
+  await log.getByText("output before the rate limit").waitFor();
+
+  // A second Refresh while one reads queues another. When that one is rate limited, the status
+  // still names the lines shown, not "Reading output…".
+  let release;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  let doubleReads = 0;
+  const doubleRefresh = async (route) => {
+    doubleReads += 1;
+    if (doubleReads === 1) {
+      await held;
+      return route.fallback();
+    }
+    return route.fulfill(rateLimitedResponse(2));
+  };
+  await page.route("**/runtime/logs?*", doubleRefresh);
+  await page.getByRole("button", { name: "Refresh logs" }).click();
+  await waitForCondition(() => doubleReads === 1, "the first refresh is held");
+  await page.getByRole("button", { name: "Refresh logs" }).click();
+  release();
+  await waitForCondition(() => doubleReads === 2, "the queued refresh reads");
+  await waitForIdleFetches(page);
+  assert.match(await logError.textContent(), /Try again in 2 seconds\./u);
+  assert.equal(await outputStatus.textContent(), shownStatus);
+  assert.equal(await log.locator(".log-row").count(), 1);
+  await page.unroute("**/runtime/logs?*", doubleRefresh);
+
+  // Following lines whose cursor was rejected cannot be read on from, so the new view clears them
+  // first, even when it is rate limited: the next read would repeat them.
+  let followReads = 0;
+  const rejectCursor = (route) => {
+    followReads += 1;
+    return route.fulfill(
+      followReads === 1
+        ? {
+            status: 400,
+            contentType: "application/json",
+            body: JSON.stringify({
+              error: { code: "RUNTIME_LOGS_CURSOR_INVALID", message: "Start a new view." },
+              meta: { requestId: rateLimitRequestId },
+            }),
+          }
+        : rateLimitedResponse(5),
+    );
+  };
+  await page.route("**/runtime/logs?*", rejectCursor);
+  await page.getByRole("button", { name: "Follow", exact: true }).click();
+  await page.clock.runFor(2_000);
+  await waitForCondition(() => followReads === 2, "the rejected cursor starts a new view");
+  await waitForIdleFetches(page);
+  assert.equal(await log.locator(".log-row").count(), 0);
+  await page.getByRole("button", { name: "Following", exact: true }).click();
+  await page.unroute("**/runtime/logs?*", rejectCursor);
+
+  // A read for another selection still clears the lines first: they belong to the old one.
+  await page.getByRole("button", { name: "Refresh logs" }).click();
+  await waitForIdleFetches(page);
+  await log.getByText("output before the rate limit").waitFor();
+  answer = rateLimitedResponse(3);
+  await page.getByLabel("Include debug").check();
+  await waitForIdleFetches(page);
+  assert.match(await logError.textContent(), /Try again in 3 seconds\./u);
+  assert.equal(await log.locator(".log-row").count(), 0);
+  assert.equal(await outputStatus.textContent(), "");
+});
+
+// A refresh keeps its lines until its page arrives, but only for the selection they belong to:
+// another source picked while that refresh is still reading clears them at once, before any read
+// for it lands (owner review of #2792).
+test("a source picked while a refresh reads clears the kept lines at once", async (t) => {
+  const logs = await logsFixture(t);
+  logs.computeDriver.state.lines = [line(1, "gateway output")];
+  logs.computeDriver.state.harnessPod = { ready: true };
+  logs.computeDriver.state.harnessLines = [line(1, "agent output")];
+  const { page } = await openRetainedLogs(t, logs);
+  const log = page.getByRole("log", { name: "Runtime log output" });
+  const outputStatus = page.locator(".log-output-status");
+  await log.getByText("gateway output").waitFor();
+  await page.locator("#runtime-log-source").selectOption("agent");
+  await log.getByText("agent output").waitFor();
+  await waitForIdleFetches(page);
+
+  const refresh = await holdRequests(t, page, "**/runtime/logs?*", { once: true });
+  await page.getByRole("button", { name: "Refresh logs" }).click();
+  try {
+    await refresh.requested;
+    // A refresh of the same source keeps the Agent line while it reads.
+    assert.equal(await log.getByText("agent output").count(), 1);
+    await page.locator("#runtime-log-source").selectOption("gateway");
+    // Checked while the refresh is still held: the Agent line is gone under the Gateway picker.
+    assert.equal(await log.locator(".log-row").count(), 0);
+    assert.equal(await outputStatus.textContent(), "Reading output…");
+  } finally {
+    refresh.release();
+  }
+  await log.getByText("gateway output").waitFor();
+  await waitForIdleFetches(page);
+  assert.equal(await log.getByText("agent output").count(), 0);
+  assert.match(await outputStatus.textContent(), /^Showing gateway in /u);
+});
+
 test("the Sandbox source shows redacted policy decisions without a Pod picker", async (t) => {
   const computeDriver = createRuntimeLogComputeDriver({ sandboxNamespace: "tenant-console" });
   const secret = `Zq9${randomUUID().replaceAll("-", "")}`;

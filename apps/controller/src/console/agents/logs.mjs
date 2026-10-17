@@ -259,6 +259,12 @@ export function renderAgentLogs(
   // A source, Pod or instance change while a read is in flight restarts the view after it.
   let restartPending = false;
   let rows = 0;
+  // The log query (source, Pod, instance, level floor) whose lines the pane shows, and the
+  // status line its first page set.
+  let shownSelection = null;
+  let shownStatus = "";
+  // Updates a manual read's "Try again in N seconds" once that wait has passed.
+  let retryHintTimer;
   // Set when a read is refused after this view showed output; Back rebuilds such a view.
   let outputRefused = false;
   let logsDenied = deniedLogViews.has(deniedKey);
@@ -329,7 +335,16 @@ export function renderAgentLogs(
     return query;
   }
 
+  function clearShownLines() {
+    cursor = null;
+    pane.replaceChildren();
+    rows = 0;
+    shownSelection = null;
+    applyFilters();
+  }
+
   function showLogError(text) {
+    clearTimeout(retryHintTimer);
     logError.hidden = text === null;
     logError.textContent = text ?? "";
   }
@@ -339,6 +354,13 @@ export function renderAgentLogs(
       return;
     }
     showLogError(withRequestId(runtimeErrorText(error, "logs", source.id, manualRead), error));
+    if (manualRead && error.status === 429 && error.retryAfterSeconds !== undefined) {
+      // A later error or a successful read replaces the text and cancels this (finding 1715).
+      // A view held for Back is updated too, so it never returns with a wait that has passed.
+      retryHintTimer = setTimeout(() => {
+        showLogError(withRequestId("Too many requests. You can try again now.", error));
+      }, error.retryAfterSeconds * 1000);
+    }
     if (error.status !== 403) {
       return;
     }
@@ -351,6 +373,7 @@ export function renderAgentLogs(
     cursor = null;
     pane.replaceChildren();
     rows = 0;
+    shownSelection = null;
     logStatus.textContent = "";
     applyFilters();
     setFollow(false);
@@ -728,6 +751,15 @@ export function renderAgentLogs(
     const pod = selectedPod();
     if (reading && restart) {
       restartPending = true;
+      // Lines kept for a refresh still in flight must not stay under another selection's
+      // picker while that read finishes: clear them now, as a restart for it would.
+      if (
+        shownSelection !== null &&
+        (!source || logQuery(source, pod).toString() !== shownSelection)
+      ) {
+        clearShownLines();
+        logStatus.textContent = "Reading output…";
+      }
       return;
     }
     if (!current() || reading || logsDenied || !readableSelection()) {
@@ -737,27 +769,42 @@ export function renderAgentLogs(
       return;
     }
     reading = true;
-    if (restart) {
-      cursor = null;
-      pane.replaceChildren();
-      rows = 0;
-      logStatus.textContent = "Reading output…";
-    }
     const query = logQuery(source, pod);
+    const selection = query.toString();
+    // Refreshing the lines shown keeps them until the new page arrives, so a failed or
+    // rate-limited refresh leaves them in place (finding 1715). A refusal still clears them in
+    // showLogReadError, and another selection clears them here: they belong to the old one. So
+    // do lines without a cursor (rejected, say): nothing could read on from them.
+    const keepShown = restart && cursor !== null && selection === shownSelection;
+    // A refresh that ends without a page puts back the status line of the lines still shown.
+    const restoreShownStatus = () => {
+      if (keepShown && selection === shownSelection) {
+        logStatus.textContent = shownStatus;
+      }
+    };
     if (restart) {
+      if (!keepShown) {
+        clearShownLines();
+      }
+      logStatus.textContent = "Reading output…";
       query.set("tailLines", String(TAIL_LINES));
-    }
-    if (cursor) {
+    } else if (cursor) {
       query.set("cursor", cursor);
     }
     let retryAfter = FOLLOW_POLL_MS;
     try {
       const page = await read(`${base}/logs?${query}`);
       if (!current() || restartPending || logsDenied) {
+        restoreShownStatus();
         return;
       }
       showLogError(null);
       logsAllowed = true;
+      if (restart) {
+        pane.replaceChildren();
+        rows = 0;
+        shownSelection = selection;
+      }
       cursor = page.cursor;
       appendRecords(page.records);
       if (statusDenied) {
@@ -777,9 +824,11 @@ export function renderAgentLogs(
                 : source.kind === "sandbox"
                   ? `Showing policy decisions and supervisor output of sandbox ${page.stream.sandbox ?? ""}.`
                   : `Showing ${previous.checked ? "the previous instance of " : ""}${page.stream.container} in ${page.stream.pod}.`;
+        shownStatus = logStatus.textContent;
       }
     } catch (error) {
       if (!current() || (restartPending && ![401, 403].includes(error.status))) {
+        restoreShownStatus();
         return;
       }
       if (error.status === 401) {
@@ -795,6 +844,7 @@ export function renderAgentLogs(
       }
       if (restart) {
         logStatus.textContent = "";
+        restoreShownStatus();
       }
       showLogReadError(error, source, { manualRead: !following });
       if (error.status === 501) {
