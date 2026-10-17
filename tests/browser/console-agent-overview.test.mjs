@@ -766,6 +766,17 @@ test("a failed version's banner does not move the overview on a slow link", asyn
     const { shift, shifts } = await takeLayoutShifts(page);
     t.diagnostic(`permissions ${permissionsDelay} ms: shift ${shift}: ${JSON.stringify(shifts)}`);
     assert.ok(shift < 0.01, `permissions ${permissionsDelay} ms: shift ${shift}`);
+    // A failure known before the page shows leads it, above the overview (finding 1655 moves
+    // only a card that lands later).
+    assert.equal(
+      await recovery.evaluate((card) =>
+        Boolean(
+          card.compareDocumentPosition(card.ownerDocument.querySelector(".agent-overview-status")) &
+          globalThis.Node.DOCUMENT_POSITION_FOLLOWING,
+        ),
+      ),
+      true,
+    );
   }
 });
 
@@ -1062,6 +1073,99 @@ for (const viewport of [
     t.diagnostic(`${size} Share Agent at ${firstTop}, ${attemptTop}, ${settledTop}`);
     assert.ok(Math.abs(attemptTop - firstTop) <= 1, `moved ${attemptTop - firstTop} px`);
     assert.ok(Math.abs(settledTop - firstTop) <= 1, `moved ${settledTop - firstTop} px`);
+  });
+}
+
+// Watching a deploy that failed, the "Deployment needs attention" card (about 200 px) appeared
+// above the overview when the failure landed, with no input, and pushed Selected version,
+// Deployment details and Share Agent down: CLS 0.13-0.15 at 1440 and 390 wide (finding 1655).
+// The page-load fix (finding 1489) waits for the outcome, which a watch cannot. A card that
+// appears once the page shows now lands below the deployment activity the reader is watching.
+for (const viewport of [
+  { width: 1440, height: 900 },
+  { width: 390, height: 844 },
+]) {
+  const size = `${viewport.width}x${viewport.height}`;
+  test(`a watched deploy that fails shows its recovery without moving the overview at ${size}`, async (t) => {
+    const fixture = await createConsoleAppFixture(t);
+    await fixture.bootstrap();
+    const namespace = await fixture.createNamespace(`Failing deploy ${size}`, { ready: true });
+    const agent = await fixture.createAgent(namespace.id, "Failing Deploy", nativeValues("v1"));
+    await fixture.seedActiveAgentRevision(namespace.id, agent.id);
+    const pending = await fixture.deployAgent(namespace.id, agent.id);
+    const { page } = await newPage(t, fixture, { browser, context: { viewport } });
+    await trackSettledFetches(page);
+    const recordUrl = deploymentUrl(fixture, namespace, agent, pending);
+    let record = deploymentRecord(namespace, agent, pending, "running");
+    await page.route(recordUrl, (route) => route.fulfill(record));
+    // Native administration is open, so its link is the primary action until the card shows.
+    await page.route(`**/agents/${agent.id}/native-admin`, (route) =>
+      route.fulfill({
+        json: {
+          data: { status: "available", url: "https://admin.example.test/" },
+          meta: { requestId: "req_test_failing_deploy" },
+        },
+      }),
+    );
+    await page.clock.install({ time: new Date("2026-10-16T12:00:00Z") });
+    await login(
+      page,
+      fixture,
+      detailUrl(fixture, namespace.id, agent.id, pending.id, "configuration"),
+    );
+    await page.getByText("Recorded status: running").waitFor();
+    await page.locator('.content [aria-live="polite"][aria-busy="false"]').waitFor();
+    await page.getByRole("heading", { name: "Share Agent" }).waitFor();
+    await waitForIdleFetches(page);
+    await page.evaluate(() => globalThis.document.fonts.ready);
+    await nextFrames(page);
+    // Polls run only when the test advances the clock.
+    const now = await page.evaluate(() => Date.now());
+    await page.clock.pauseAt(new Date(now + 1000));
+    const recovery = page.getByRole("region", { name: "Deployment needs attention" });
+    assert.equal(await recovery.isVisible(), false);
+    const tops = () =>
+      page.evaluate(() =>
+        Object.fromEntries(
+          [".agent-current-summary", ".deployment-status"].map((selector) => [
+            selector,
+            Math.round(
+              globalThis.document.querySelector(selector).getBoundingClientRect().top +
+                globalThis.scrollY,
+            ),
+          ]),
+        ),
+      );
+    const before = await tops();
+
+    // The deploy fails its startup model check; the next poll reads it.
+    record = deploymentRecord(
+      namespace,
+      agent,
+      pending,
+      "failed",
+      persistedDeploymentError("RUNTIME_MODEL_PROBE_FAILED"),
+    );
+    const read = page.waitForResponse(recordUrl);
+    await page.clock.runFor(DEPLOYMENT_POLL_MS);
+    await read;
+    await recovery.getByText("v2 failed its startup model check.", { exact: false }).waitFor();
+    await waitForIdleFetches(page);
+    assert.deepEqual(await tops(), before, "the overview stays in place");
+    // The card follows the deployment's activity, and its first action is the page's one primary:
+    // native administration's link steps back, as it does beside a card above the overview.
+    assert.equal(
+      await recovery.evaluate(
+        (card) => card.previousElementSibling?.classList.contains("agent-overview-status") === true,
+      ),
+      true,
+    );
+    const background = (locator) =>
+      locator.evaluate((node) => globalThis.getComputedStyle(node).backgroundColor);
+    const logs = recovery.getByRole("link", { name: "Open v2 Logs" });
+    const admin = page.getByRole("link", { name: "Open admin console" });
+    assert.equal(await admin.isVisible(), true);
+    assert.notEqual(await background(admin), await background(logs));
   });
 }
 

@@ -316,8 +316,12 @@ for (const outcome of ["fills", "is refused"]) {
     await page.locator(settledView).getByRole("table", { name: "Agents" }).waitFor();
     await rows.revisions.requested;
     assert.equal(await viewTag(page), "kept");
-    const loading = row.getByText(READING, { exact: true });
+    // The pending cell's text is blank for its first 250 ms (finding 1656); its holder has focus.
+    const loading = row.locator(".agent-deployment [data-return-focus-href]");
+    assert.equal(await loading.textContent(), READING);
     assert.equal(await isFocused(loading), true, "Back focused the pending deployment");
+    // Blank on screen, the focused holder's text still reaches a screen reader.
+    assert.match(await loading.ariaSnapshot(), /Reading deployment…/);
     const listUrl = page.url();
     await page.keyboard.press("Enter");
     assert.equal(page.url(), listUrl, "Enter must not open the previous deployment");
@@ -341,6 +345,96 @@ for (const outcome of ["fills", "is refused"]) {
       assert.equal(await isFocused(deploymentLink), true, "the fresh link kept focus");
     }
     assert.equal(await viewTag(page), "kept");
+  });
+}
+
+// Sample the first frame, then seek the actual CSS animations. A busy browser may deliver
+// its first animation frame late; elapsed time between two callbacks is not the loading delay.
+function measureReadingDelay(reading) {
+  const sample = () => {
+    const table = globalThis.document.querySelector(
+      '.content [aria-live="polite"]:not([inert]) .agent-table',
+    );
+    const labels = [...(table?.querySelectorAll(".agent-deployment span") ?? [])].filter(
+      (node) => node.textContent === reading && node.childElementCount === 0,
+    );
+    if (!labels.length) {
+      globalThis.requestAnimationFrame(sample);
+      return;
+    }
+    const visible = () =>
+      labels.filter((node) => {
+        const { visibility, opacity } = globalThis.getComputedStyle(node);
+        return visibility === "visible" && opacity !== "0";
+      }).length;
+    const firstFrame = visible();
+    const animations = labels.flatMap((label) => label.getAnimations());
+    const visibleAt = (ms) => {
+      for (const animation of animations) {
+        animation.pause();
+        animation.currentTime = ms;
+      }
+      return visible();
+    };
+    globalThis.__readingVisibility = {
+      labels: labels.length,
+      firstFrame,
+      at249: visibleAt(249),
+      at250: visibleAt(250),
+    };
+  };
+  globalThis.requestAnimationFrame(sample);
+}
+
+// After #2717 a return to a retained list painted "Reading deployment…" in every row for a frame
+// or more (60-142 ms) before the rereads filled them (finding 1656). The text now follows the
+// 250 ms rule: blank at first, shown only if the read is still pending, and the old value is
+// never shown either way. A first visit's rows follow the same rule.
+for (const visit of ["a first visit", "a return"]) {
+  test(`Rows read on ${visit} paint no "Reading deployment…" until the read is slow`, async (t) => {
+    const fixture = await createConsoleAppFixture(t);
+    await fixture.bootstrap();
+    const namespace = await fixture.createNamespace(`Quiet rows ${visit}`, { ready: true });
+    const agents = [];
+    for (const label of ["Quiet Agent 1", "Quiet Agent 2", "Quiet Agent 3"]) {
+      const agent = await fixture.createAgent(namespace.id, label, nativeValues(label));
+      await fixture.seedActiveAgentRevision(namespace.id, agent.id);
+      agents.push({ ...agent, name: label });
+    }
+    const { page } = await newPage(t, fixture);
+    await page.route(deploymentsRead(namespace), (route) =>
+      route.fulfill(deploymentRecord(namespace, "succeeded")),
+    );
+    const first = visit === "a first visit";
+    let rows = first ? await holdRowReads(t, page, namespace) : null;
+    if (first) {
+      await page.addInitScript(`(${measureReadingDelay})(${JSON.stringify(READING)})`);
+    }
+    await login(page, fixture, `/console/agents?namespace=${namespace.id}`);
+    await page.locator(settledView).getByRole("table", { name: "Agents" }).waitFor();
+    if (!first) {
+      await page.getByText(READING).first().waitFor({ state: "detached" });
+      await tagView(page);
+      await openAgent(page, agents[0]);
+      rows = await holdRowReads(t, page, namespace);
+      await page.evaluate(measureReadingDelay, READING);
+      await page.goBack();
+      await page.locator(settledView).getByRole("table", { name: "Agents" }).waitFor();
+      assert.equal(await viewTag(page), "kept", "the retained list was reused");
+    }
+    await rows.revisions.requested;
+    const observation = await page.waitForFunction(() => globalThis.__readingVisibility);
+    assert.deepEqual(await observation.jsonValue(), {
+      labels: 3,
+      firstFrame: 0,
+      at249: 0,
+      at250: 3,
+    });
+    rows.release();
+    await page.getByText(READING).first().waitFor({ state: "detached" });
+    for (const text of Object.values(await deploymentCells(page))) {
+      assert.match(text, /^v1 · succeeded/);
+    }
   });
 }
 
