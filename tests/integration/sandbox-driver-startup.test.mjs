@@ -1189,7 +1189,12 @@ test("the OpenShell Credential Gateway reports a withdrawal absent only once the
     calls.push(["detachSandboxProvider", name, detached]);
     return detachAnswers.length === 0 ? detachAnswer : detachAnswers.shift();
   };
-  client.getSandboxProviderStatus = async () => ({ state: "PROVIDER_READINESS_STATE_REVOKED" });
+  // The receipts the status reads name: each settles the detach it follows.
+  const receipts = [];
+  client.getSandboxProviderStatus = async (_workspace, _sandbox, _provider, _signal, receiptId) => {
+    receipts.push(receiptId);
+    return { state: "PROVIDER_READINESS_STATE_REVOKED" };
+  };
   const withdraw = (recheck) =>
     driver.withdraw({
       namespace,
@@ -1228,6 +1233,7 @@ test("the OpenShell Credential Gateway reports a withdrawal absent only once the
   // unconfirmed, so the worker retries, and a refusal on the second read carries the code.
   calls.length = 0;
   listed = [provider];
+  receipts.length = 0;
   detachAnswers.push(undefined, { receiptId: "receipt-restored" });
   assert.deepEqual(await withdraw(false), { sourceId, state: "revoked" });
   assert.deepEqual(calls, [
@@ -1236,6 +1242,7 @@ test("the OpenShell Credential Gateway reports a withdrawal absent only once the
     ["getSandbox", sandbox],
     ["detachSandboxProvider", sandbox, provider],
   ]);
+  assert.deepEqual(receipts, ["receipt-restored"]);
   detachAnswers.push(undefined, undefined);
   await assert.rejects(
     withdraw(false),
@@ -1248,6 +1255,21 @@ test("the OpenShell Credential Gateway reports a withdrawal absent only once the
   };
   await unauthorized(false, true);
   client.getSandbox = sandboxRead;
+  // Outside a recheck only a receipt revokes: a restored Sandbox that does not list the provider
+  // is detached all the same.
+  calls.length = 0;
+  receipts.length = 0;
+  listed = ["operator-static"];
+  detachAnswers.push(undefined, { receiptId: "receipt-unlisted" });
+  assert.deepEqual(await withdraw(false), { sourceId, state: "revoked" });
+  assert.deepEqual(calls, [
+    ["detachSandboxProvider", sandbox, provider],
+    ["getWorkspace", workspace],
+    ["getSandbox", sandbox],
+    ["detachSandboxProvider", sandbox, provider],
+  ]);
+  assert.deepEqual(receipts, ["receipt-unlisted"]);
+  listed = [provider];
   // A refusal on the receipt's status read carries the code too.
   const statusRead = client.getSandboxProviderStatus;
   client.getSandboxProviderStatus = async () => {
