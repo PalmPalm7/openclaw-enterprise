@@ -15,6 +15,10 @@ import {
   openClawRuntimeArtifact,
   validatePolicies,
 } from "../../apps/controller/src/drivers/plugin/runtime-translator.ts";
+import {
+  deniedOpenClawSelection,
+  openClawToolDenialMessage,
+} from "../../apps/controller/src/drivers/plugin/openclaw-tool-denial.ts";
 import { NativeCodexPluginCatalogReader } from "../../apps/controller/src/drivers/plugin/stdio-catalog-reader.ts";
 import { requestFailure } from "../../apps/controller/src/http/errors.ts";
 import { NotImplementedError } from "../../packages/occ/src/index.ts";
@@ -423,6 +427,114 @@ test("OpenClaw tool enablement overrides tool defaults without enabling a disabl
   assert.deepEqual(openClawRuntimeArtifact(selections).configuration, {
     plugins: { entries: { diffs: { enabled: false } } },
   });
+});
+
+test("OpenClaw Plugin Driver refuses a selection a roster entry's tools.deny blocks", () => {
+  const driver = new OCCPluginDriver();
+  const plugins = occSelection();
+  const refusal = (setting, verb = "blocks", entries = "entry") =>
+    `Configuration ${setting} ${verb} every tool of plugin occ-plugin:diffs; remove the matching deny ${entries} or deselect the plugin.`;
+  const check = (configuration) => () => driver.validateAgentConfiguration(plugins, configuration);
+  // The pinned Gateway resolves a session's tool policy from its Agent's own entry, and with
+  // one entry every session runs as it, whatever its key (finding 1848).
+  for (const [key, deny] of [
+    ["main", ["*"]],
+    ["Ops", [" GROUP:PLUGINS "]],
+    ["helper_1", ["exec", "dif*"]],
+  ]) {
+    const configuration = { agents: { entries: { [key]: { tools: { deny } } } } };
+    assert.throws(check(configuration), {
+      name: "ConfigurationHarnessError",
+      message: refusal(`setting agents.entries.${key}.tools.deny`),
+    });
+  }
+  // An entry key that is not a plain ID is quoted, as other roster refusals quote it.
+  assert.throws(check({ agents: { entries: { "a.b": { tools: { deny: ["diffs"] } } } } }), {
+    message: refusal('setting agents.entries["a.b"].tools.deny'),
+  });
+  // Each list that blocks the plugin on its own is named, so one fix clears the refusal.
+  assert.throws(
+    check({ tools: { deny: ["*"] }, agents: { entries: { main: { tools: { deny: ["*"] } } } } }),
+    {
+      message: refusal(
+        "settings tools.deny and agents.entries.main.tools.deny",
+        "block",
+        "entries",
+      ),
+    },
+  );
+  assert.throws(
+    check({ tools: { deny: ["*"] }, agents: { entries: { main: { tools: { deny: ["exec"] } } } } }),
+    { message: refusal("setting tools.deny") },
+  );
+  // A disabled selection adds nothing to the allowlist, and agents.defaults carries no tool
+  // policy in the pinned Gateway.
+  driver.validateAgentConfiguration(
+    { "occ-plugin:diffs": { enabled: false } },
+    { agents: { entries: { main: { tools: { deny: ["*"] } } } } },
+  );
+  // Only deny lists are checked: an entry allowlist that leaves the plugin out still leaves
+  // other tools callable, so turns run.
+  for (const configuration of [
+    { agents: { entries: { main: { tools: { deny: ["exec", "diffs-*", 7] } } } } },
+    { agents: { entries: { main: { tools: { allow: ["exec"] } } } } },
+    { agents: { defaults: { tools: { deny: ["*"] } } } },
+    { agents: { entries: { main: {} } } },
+  ]) {
+    driver.validateAgentConfiguration(plugins, configuration);
+  }
+  // With several entries each session names its Agent. Denying the plugin to one of them is
+  // a valid setup, but an entry denying every tool fails each of its sessions' turns.
+  const roster = (ops) => ({
+    ownership: "explicit",
+    entries: { main: { tools: { deny: ["exec"] } }, ops: { tools: { deny: ops } } },
+  });
+  driver.validateAgentConfiguration(plugins, { agents: roster(["group:plugins"]) });
+  assert.throws(check({ agents: roster(["exec", " ** "]) }), {
+    message: refusal("setting agents.entries.ops.tools.deny"),
+  });
+  assert.throws(check({ tools: { deny: ["*"] }, agents: roster(["*"]) }), {
+    message: refusal("settings tools.deny and agents.entries.ops.tools.deny", "block", "entries"),
+  });
+  assert.throws(check({ tools: { deny: ["diffs"] }, agents: roster(["exec"]) }), {
+    message: refusal("setting tools.deny"),
+  });
+  // A plugin with several tools is refused when the two lists together block all of them,
+  // and the refusal names both.
+  const catalog = [
+    {
+      id: "occ-plugin:pair",
+      name: "Pair",
+      tools: [
+        { id: "pair_read", name: "pair_read", ownerId: "pair" },
+        { id: "pair_write", name: "pair_write", ownerId: "pair" },
+      ],
+    },
+  ];
+  const pair = { "occ-plugin:pair": { enabled: true } };
+  const split = (entryDeny) => ({
+    tools: { deny: ["pair_read"] },
+    agents: { entries: { main: { tools: { deny: entryDeny } } } },
+  });
+  assert.deepEqual(deniedOpenClawSelection(catalog, pair, split(["pair_write"])), {
+    pluginId: "occ-plugin:pair",
+    global: true,
+    entry: "main",
+  });
+  assert.deepEqual(deniedOpenClawSelection(catalog, pair, split(["pair"])), {
+    pluginId: "occ-plugin:pair",
+    global: false,
+    entry: "main",
+  });
+  assert.equal(deniedOpenClawSelection(catalog, pair, split(["pair_read"])), undefined);
+  // With several entries only a deny-all entry is refused, never a union of lists.
+  const several = split(["pair_write"]);
+  several.agents = { ownership: "explicit", entries: { ...several.agents.entries, ops: {} } };
+  assert.equal(deniedOpenClawSelection(catalog, pair, several), undefined);
+  assert.equal(
+    openClawToolDenialMessage(deniedOpenClawSelection(catalog, pair, split(["pair_write"]))),
+    "Configuration settings tools.deny and agents.entries.main.tools.deny block every tool of plugin occ-plugin:pair; remove the matching deny entries or deselect the plugin.",
+  );
 });
 
 test("Hardcoded OpenAI catalog returns curated details without provider requests", async (t) => {
