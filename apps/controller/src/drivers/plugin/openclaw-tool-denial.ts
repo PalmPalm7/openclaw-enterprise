@@ -25,6 +25,12 @@ export type DeniedOpenClawSelection =
     }
   | {
       readonly pluginId: string;
+      readonly kind: "entryDenyAll";
+      /** The deny-all lists of one roster entry among several, in the order OpenClaw applies them. */
+      readonly lists: readonly OpenClawToolPolicySetting[];
+    }
+  | {
+      readonly pluginId: string;
       readonly kind: "alsoAllow";
       /** The sole roster entry whose `tools.alsoAllow` drops the plugin's grant. */
       readonly entry: string;
@@ -135,6 +141,11 @@ export function deniedOpenClawSelection(
         blocking?.lists.some(({ entry }) => entry !== undefined) === true &&
         (blocking.alone || global === undefined)
       ) {
+        // With several entries only that entry's turns fail: the operator may want a tool-less
+        // Agent, so the refusal says why it cannot run beside a plugin selection (finding 1860).
+        if (roster.length > 1 && blocking.lists.every(({ entry }) => entry !== undefined)) {
+          return { pluginId, kind: "entryDenyAll", lists: blocking.lists.map(setting) };
+        }
         return { pluginId, kind: "deny", lists: blocking.lists.map(setting) };
       }
     }
@@ -180,6 +191,17 @@ export function openClawToolDenialMessage(denied: DeniedOpenClawSelection): stri
     );
   }
   const several = denied.lists.length > 1;
+  if (denied.kind === "entryDenyAll") {
+    // OpenClaw counts the plugin's grant as an explicit allowlist, which a deny-all list
+    // empties, so every turn of that Agent fails with "No callable tools remain". An entry
+    // holds at most two lists, its tools.deny and then one byProvider list; when both deny
+    // every tool, the second is named relative to the first so both fit the cap.
+    return fitted(
+      [{ ...denied.lists[0]!, suffix: "deny" }],
+      (path) =>
+        `Configuration setting ${path}${several ? " and its byProvider list deny" : " denies"} every tool, so every turn of that Agent fails with plugin ${pluginId} selected; remove "*"${several ? " from both" : ""} or move the Agent to a Configuration without plugins.`,
+    );
+  }
   return fitted(
     denied.lists.map((list) => ({ ...list, suffix: "deny" })),
     (paths) =>
