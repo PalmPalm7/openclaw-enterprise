@@ -115,6 +115,28 @@ for (const writableConfig of [false, true]) {
         const logs = await runDocker(["logs", containerName]).catch((logsError) => logsError);
         // CI truncates error messages; preserve complete container logs separately.
         t.diagnostic(commandOutput(logs));
+        // CI also keeps only 1,000 characters of each output line, which the log above spends
+        // on the Gateway's first lines. Each wrapper phase and each stream's last lines get a
+        // line of their own, so a peer change with no respawn shows where the wrapper stopped
+        // (finding 1875).
+        for (const entry of jsonLogEntries(commandOutput(logs))) {
+          if (entry?.event === "runtime.startup_phase") {
+            t.diagnostic(
+              `wrapper phase at failure: ${entry.phase}:${entry.outcome}${entry.code ? ` ${entry.code}` : ""} ${entry.ms}/${entry.sinceStartMs} ms (duration/since start)`,
+            );
+          }
+        }
+        // Its own read: a log over runDocker's 1 MB buffer would keep only its beginning.
+        const tail = await runDocker(["logs", "--tail", "20", containerName]).catch(
+          (tailError) => tailError,
+        );
+        for (const stream of ["stdout", "stderr"]) {
+          for (const line of String(tail[stream] ?? "").split("\n")) {
+            if (line.trim() !== "") {
+              t.diagnostic(`container ${stream} tail: ${line}`);
+            }
+          }
+        }
         const runtimeErrors = jsonLogEntries(commandOutput(logs))
           .filter((entry) => entry.level === "error")
           .map((entry) => entry.message)
