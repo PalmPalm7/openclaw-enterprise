@@ -1014,6 +1014,94 @@ describe("module boundaries", { concurrency: true }, () => {
     assert.equal(types.runtimeTarget, null);
   });
 
+  test("refuses case-insensitive reserved export segments like native Node", async (t) => {
+    const { root, write, cli, link, exports } = await workspace(t);
+    await exports({
+      "./mixed": "./src/NoDe_MoDuLeS/entry.mjs",
+      "./encoded": "./src/%4eODE_MODULES/entry.mjs",
+      "./fallback": ["./src/NoDe_MoDuLeS/entry.mjs", "./src/conditional.mjs"],
+      "./valid": "./src/node_modules-backup/entry.mjs",
+    });
+    await link();
+    for (const directory of ["NoDe_MoDuLeS", "NODE_MODULES", "node_modules-backup"]) {
+      await write(`packages/library/src/${directory}/entry.mjs`, "export const value = 1;\n");
+    }
+    await write("apps/app/src/mixed.mjs", 'import "@fixture/library/mixed";');
+    await write("apps/app/src/encoded.mjs", 'import "@fixture/library/encoded";');
+    await write("apps/app/src/mixed.cjs", 'require("@fixture/library/mixed");');
+    await write("apps/app/src/valid.mjs", 'import "@fixture/library/valid";');
+    await write("apps/app/src/fallback.mjs", 'import "@fixture/library/fallback";');
+
+    // Real Node selects the fallback without executing a rejected target. ESM and
+    // CommonJS both refuse the same reserved directory, regardless of its case.
+    for (const file of ["mixed.mjs", "encoded.mjs", "mixed.cjs"]) {
+      const error = await failure(node([join(root, "apps/app/src", file)]), 1);
+      assert.match(error.stderr, /ERR_INVALID_PACKAGE_TARGET/);
+    }
+    await node([join(root, "apps/app/src/valid.mjs")]);
+    const fallback = await node(
+      [
+        "--input-type=module",
+        "-e",
+        'console.log(import.meta.resolve("@fixture/library/fallback"))',
+      ],
+      { cwd: root },
+    );
+    assert.equal(
+      fileURLToPath(fallback.stdout.trim()),
+      join(root, "packages/library/src/conditional.mjs"),
+    );
+
+    const result = await failure(cli(["--json"]), 1);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.ok, false);
+    assert.deepEqual(rules(report), Array(3).fill("unsupported-package-export"));
+    for (const file of ["mixed.mjs", "encoded.mjs", "mixed.cjs"]) {
+      assert.equal(from(report, `apps/app/src/${file}`).length, 0);
+    }
+    assert.equal(
+      from(report, "apps/app/src/valid.mjs")[0].to,
+      "packages/library/src/node_modules-backup/entry.mjs",
+    );
+    assert.equal(
+      from(report, "apps/app/src/fallback.mjs")[0].to,
+      "packages/library/src/conditional.mjs",
+    );
+  });
+
+  test("preserves valid export query and fragment names while checking slash segments", async (t) => {
+    const { root, write, cli, link, exports } = await workspace(t);
+    await exports({
+      "./query": "./src/entry.mjs?NoDe_MoDuLeS",
+      "./fragment": "./src/entry.mjs#NoDe_MoDuLeS",
+      "./query-slash": "./src/entry.mjs?q=/NoDe_MoDuLeS/end",
+    });
+    await link();
+    await write("packages/library/src/entry.mjs", "export const value = 1;\n");
+    for (const name of ["query", "fragment", "query-slash"]) {
+      await write(
+        `apps/app/src/${name}.mjs`,
+        `import { value } from "@fixture/library/${name}"; console.log(value);`,
+      );
+    }
+    for (const name of ["query", "fragment"]) {
+      assert.equal((await node([join(root, `apps/app/src/${name}.mjs`)])).stdout.trim(), "1");
+    }
+    const rejected = await failure(node([join(root, "apps/app/src/query-slash.mjs")]), 1);
+    assert.match(rejected.stderr, /ERR_INVALID_PACKAGE_TARGET/);
+
+    const result = await failure(cli(["--json"]), 1);
+    const report = JSON.parse(result.stdout);
+    assert.deepEqual(rules(report), ["unsupported-package-export"]);
+    for (const name of ["query", "fragment"]) {
+      assert.equal(
+        from(report, `apps/app/src/${name}.mjs`)[0].to,
+        "packages/library/src/entry.mjs",
+      );
+    }
+    assert.equal(from(report, "apps/app/src/query-slash.mjs").length, 0);
+  });
+
   test("does not treat a declaration-only target as runtime code", async (t) => {
     const { write, check } = await workspace(t);
     await write("apps/app/src/declaration.d.ts", "export interface Value {};");
