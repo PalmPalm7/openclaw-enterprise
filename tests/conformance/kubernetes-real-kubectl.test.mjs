@@ -422,13 +422,30 @@ test(
     assert.throws(() => context.after(() => ran.push("port-forward stop")), {
       message: stopsSetup,
     });
+    // A late cleanup may register another, as during the teardown, without being stopped.
+    assert.throws(
+      () =>
+        context.after(() => {
+          context.after(() => ran.push("pool end"));
+          ran.push("observer stop");
+        }),
+      { message: stopsSetup },
+    );
     await delay(300);
-    assert.deepEqual(ran, ["early cleanup", "worker stop", "port-forward stop"]);
-    assert.equal(events.filter((event) => event === "fail").length, 3);
+    // Registered in one turn, they run newest-first like the teardown, and a cleanup's own
+    // registration runs next.
+    assert.deepEqual(ran, [
+      "early cleanup",
+      "observer stop",
+      "pool end",
+      "port-forward stop",
+      "worker stop",
+    ]);
+    assert.equal(events.filter((event) => event === "fail").length, 5);
     assert.equal(events.filter((event) => event === "exit").length, 1);
     assert.equal(
       logs.filter((line) => / came after the teardown ran; running it now$/.test(line)).length,
-      3,
+      5,
     );
     assert.ok(
       logs.some((line) =>
@@ -437,6 +454,43 @@ test(
         ),
       ),
     );
+  },
+);
+
+test(
+  "two teardowns' late cleanups both run when one starts while the other's runs",
+  { timeout: 5_000 },
+  async () => {
+    // Each teardown drains its own late queue; a file-wide count of running late cleanups once
+    // decided whether one was drained, so the second teardown's cleanup was queued and never ran.
+    const options = {
+      log: () => {},
+      exit: () => {},
+      failFile: () => {},
+      settled: (quietMs) => delay(quietMs),
+    };
+    const first = new RecordingContext();
+    const second = new RecordingContext();
+    const { context: firstContext } = boundedTeardown(first, options);
+    const { context: secondContext } = boundedTeardown(second, options);
+    await first.hooks[0]();
+    await second.hooks[0]();
+    const ran = [];
+    let release;
+    assert.throws(() =>
+      firstContext.after(async () => {
+        await new Promise((resolve) => {
+          release = resolve;
+        });
+        ran.push("first late cleanup");
+      }),
+    );
+    await delay(20);
+    assert.throws(() => secondContext.after(() => ran.push("second late cleanup")));
+    await delay(20);
+    release();
+    await delay(50);
+    assert.deepEqual(ran.sort(), ["first late cleanup", "second late cleanup"]);
   },
 );
 
@@ -512,29 +566,33 @@ test(
         await delay(500);
         process.stdout.write("attempted file after\\n");
       });
+      // A failing file hook skips the root's later ones; the file's end must still be seen.
+      after(() => {
+        throw new Error("file after hook failed");
+      });
       // Named like node:test's own root, which must not pass for the file's end.
       it("<root>", (testContext) => {
         const { context } = boundedTeardown(testContext, { stepLimitMs: 100, exitGraceMs: 200 });
         // Never settles, and its poll keeps the process alive.
         context.after(() => new Promise(() => setInterval(() => {}, 50)));
       });
-      describe("suite", () => {
-        let tests = 0;
-        beforeEach(async () => {
-          tests += 1;
-          if (tests === 2) {
-            await delay(500);
-          }
-        });
-        after(async () => {
+      // While this runs before the second test, no test is running at all.
+      let tests = 0;
+      beforeEach(async () => {
+        tests += 1;
+        if (tests === 2) {
           await delay(500);
-          process.stdout.write("attempted suite after\\n");
-        });
-        it("first", () => {});
-        it("second outlasts the grace", async (testContext) => {
-          const { context } = boundedTeardown(testContext);
-          context.after(() => process.stdout.write("attempted second cleanup\\n"));
-          await delay(1_000);
+        }
+      });
+      it("second outlasts the grace", async (testContext) => {
+        const { context } = boundedTeardown(testContext);
+        context.after(() => process.stdout.write("attempted second cleanup\\n"));
+        await describe("later suite", () => {
+          after(async () => {
+            await delay(500);
+            process.stdout.write("attempted suite after\\n");
+          });
+          it("child", () => {});
         });
       });
     `);
@@ -543,8 +601,8 @@ test(
     assert.equal(exited.code, 1);
     assert.match(exited.stdout, /^not ok 1 - <root>$/m);
     assert.deepEqual(exited.stdout.match(/^attempted .+$/gm), [
-      "attempted second cleanup",
       "attempted suite after",
+      "attempted second cleanup",
       "attempted file after",
     ]);
     assert.match(exited.stdout, /^\s*ok 2 - second outlasts the grace$/m);
@@ -601,20 +659,17 @@ test(
 );
 
 test(
-  "a pending exit stops waiting for timed-out setup at its limit",
+  "a timeout arms the exit, which waits for setup that never stops only to its limit",
   { timeout: 20_000 },
   async () => {
-    // Setup that never reaches another cleanup registration holds the exit only for its limit.
+    // Setup still running after its test timed out, holding a handle and never registering
+    // again, kept the file alive until the runner's file timeout. The timeout now arms the exit,
+    // which waits for that setup only to its limit.
     const exited = await runTestScript(`
       import test from "node:test";
-      import { setTimeout as delay } from "node:timers/promises";
       import { boundedTeardown } from ${JSON.stringify(kubernetesHelperUrl)};
-      test("first abandons a cleanup", (testContext) => {
-        const { context } = boundedTeardown(testContext, { stepLimitMs: 100, exitGraceMs: 200 });
-        context.after(() => new Promise(() => setInterval(() => {}, 50)));
-      });
-      test("second never stops", { timeout: 200 }, async (testContext) => {
-        boundedTeardown(testContext, { label: "second", stepLimitMs: 1_000 });
+      test("never stops", { timeout: 200 }, async (testContext) => {
+        boundedTeardown(testContext, { label: "setup", stepLimitMs: 1_000, exitGraceMs: 200 });
         await new Promise(() => setInterval(() => {}, 50));
       });
     `);
@@ -623,7 +678,82 @@ test(
     assert.equal(exited.code, 1);
     assert.match(
       exited.stderr,
-      /^second: setup still ran 1000 ms after its test ended; exiting without it$/m,
+      /^setup: exiting once the file's tests settle for 200 ms; its test timed out or was cancelled with setup that may still run$/m,
+    );
+    assert.match(
+      exited.stderr,
+      /^setup: setup still ran 1000 ms after its test ended; exiting without it$/m,
+    );
+  },
+);
+
+test(
+  "the topology and OpenShell cleanup lists register every cleanup after their teardown ran",
+  { timeout: 20_000 },
+  async () => {
+    // A late registration throws to stop the setup; a list that stopped at its first entry would
+    // leave every resource behind the later entries (the pools, Namespaces and directories).
+    const topologyHelper = new URL("../helpers/harness-topology-k3d-real.mjs", import.meta.url)
+      .href;
+    const openShellHelper = new URL("../helpers/openshell-kubernetes-real.mjs", import.meta.url)
+      .href;
+    const exited = await runTestScript(`
+      import { boundedTeardown } from ${JSON.stringify(kubernetesHelperUrl)};
+      import {
+        productionTopologyCleanupOrder,
+        registerProductionTopologyCleanups,
+      } from ${JSON.stringify(topologyHelper)};
+      import {
+        openShellInstallationCleanupOrder,
+        registerOpenShellInstallationCleanups,
+      } from ${JSON.stringify(openShellHelper)};
+      const attempt = (name) => process.stdout.write("attempted " + name + "\\n");
+      for (const [order, register] of [
+        [productionTopologyCleanupOrder, registerProductionTopologyCleanups],
+        [openShellInstallationCleanupOrder, registerOpenShellInstallationCleanups],
+      ]) {
+        const hooks = [];
+        const { context } = boundedTeardown(
+          { after: (hook) => hooks.push(hook) },
+          { exitGraceMs: 0, log: () => {}, exit: () => {}, failFile: () => {} },
+        );
+        await hooks[0]();
+        const operations = Object.fromEntries(order.map((name) => [name, () => attempt(name)]));
+        try {
+          register(context, operations);
+          process.stdout.write("not stopped\\n");
+        } catch (error) {
+          process.stdout.write("stopped: " + /setup stops here/.test(error.message) + "\\n");
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    `);
+    assert.equal(exited.code, 0, exited.stderr);
+    assert.deepEqual(exited.stdout.match(/^stopped: .+$/gm), ["stopped: true", "stopped: true"]);
+    assert.doesNotMatch(exited.stdout, /^not stopped$/m);
+    // Newest-first, as the teardown would have run them.
+    assert.deepEqual(
+      exited.stdout.match(/^attempted .+$/gm),
+      [
+        ...[
+          "gatewayForward",
+          "worker",
+          "productionApp",
+          "observerPool",
+          "postgresNetwork",
+          "gatewayRuntimeNamespace",
+          "placementNamespace",
+          "temporaryDirectory",
+        ],
+        ...[
+          "workerStop",
+          "portForwards",
+          "productionApp",
+          "observerPool",
+          "workloadNamespace",
+          "temporaryDirectory",
+        ],
+      ].map((name) => `attempted ${name}`),
     );
   },
 );
