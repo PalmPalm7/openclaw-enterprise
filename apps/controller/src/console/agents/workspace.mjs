@@ -24,6 +24,16 @@ function fileError(error, writing) {
   return text + (error.requestId ? ` Request ID: ${error.requestId}` : "");
 }
 
+// Only this answer confirms the file itself is absent. A resource or scope 404 does not establish
+// the native file's current state.
+function confirmsMissingFile(error) {
+  return (
+    error.status === 404 &&
+    error.code === "NOT_FOUND" &&
+    error.serverMessage === "The requested workspace file was not found."
+  );
+}
+
 // Returns the section and `refresh`, which rereads the files in place after another version
 // becomes current.
 export function renderWorkspaceFiles(context, agent, path) {
@@ -73,6 +83,8 @@ export function renderWorkspaceFiles(context, agent, path) {
     // Counts reads and saves, so an in-place reread never overwrites a later answer.
     let operations = 0;
     let refreshAfterPending = false;
+    // Set while the status says a reread failed, so a later good reread clears it (finding 1878).
+    let rereadFailed = false;
     context.drafts.track(draftKey, () => {
       if (!loaded && !initialized) {
         return retained;
@@ -120,6 +132,7 @@ export function renderWorkspaceFiles(context, agent, path) {
       }
       operations += 1;
       pending = true;
+      rereadFailed = false;
       updateControls();
       error.textContent = "";
       status.textContent = `Loading ${name}…`;
@@ -153,12 +166,7 @@ export function renderWorkspaceFiles(context, agent, path) {
           return;
         }
         // Explicit Reload can settle an unknown write only when the API confirms file absence.
-        // A resource/scope 404 does not establish the native file's current state.
-        const missingReadback =
-          discard &&
-          cause.status === 404 &&
-          cause.code === "NOT_FOUND" &&
-          cause.serverMessage === "The requested workspace file was not found.";
+        const missingReadback = discard && confirmsMissingFile(cause);
         // A missing file can be created through PUT. Other read failures never enable a blank overwrite.
         if (cause.status === 404 && (!outcomeUnknown || missingReadback)) {
           editor.value = !discard && retained ? retained.text : "";
@@ -213,6 +221,7 @@ export function renderWorkspaceFiles(context, agent, path) {
       operations += 1;
       pending = true;
       writing = true;
+      rereadFailed = false;
       updateControls();
       error.textContent = "";
       status.textContent = `Saving ${name}…`;
@@ -270,6 +279,8 @@ export function renderWorkspaceFiles(context, agent, path) {
       if (outcomeUnknown || shown !== (baseline ?? "")) {
         return;
       }
+      // Only a file read as missing (404) is loaded without a baseline; it shows that error.
+      const missing = baseline === undefined;
       const started = (operations += 1);
       let file;
       try {
@@ -282,8 +293,14 @@ export function renderWorkspaceFiles(context, agent, path) {
           context.onExpired();
           return;
         }
+        if (missing && confirmsMissingFile(cause)) {
+          // Still missing: its error already says so, and nothing new failed (finding 1878).
+          clearRereadFailure();
+          return;
+        }
         // The file stays as last read, and the reader learns it may be out of date.
         status.textContent = `${name} could not be reread. Reload to check its current contents.`;
+        rereadFailed = true;
         return;
       }
       if (!context.isCurrent() || operations !== started || pending || editor.value !== shown) {
@@ -292,10 +309,20 @@ export function renderWorkspaceFiles(context, agent, path) {
       // An identical value leaves the caret where it was.
       editor.value = file.content;
       baseline = editor.value;
-      if (baseline !== shown) {
+      if (missing || baseline !== shown) {
         error.textContent = "";
         status.textContent = `${name} reloaded with its current contents.`;
+        rereadFailed = false;
         updateControls();
+      } else {
+        clearRereadFailure();
+      }
+    }
+    // A reread that answered clears the status left by an earlier failed one.
+    function clearRereadFailure() {
+      if (rereadFailed) {
+        rereadFailed = false;
+        status.textContent = "";
       }
     }
     refreshers.push(refresh);
