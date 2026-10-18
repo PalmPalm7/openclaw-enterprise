@@ -933,6 +933,8 @@ func TestAgentRevisionBrowsingKeepsHealthyStatusBesideUnreadableSnapshot(t *test
 // The revisions command shows one page; it passes --limit and --cursor through
 // and prints how to read the next page.
 func TestAgentRevisionsPagesWithCursor(t *testing.T) {
+	// A stale environment scope must not replace the explicitly selected Namespace.
+	t.Setenv("OCC_NAMESPACE", "ns_55555555-5555-4555-8555-555555555555")
 	responses := agentRevisionResponses()
 	agentPath := "/namespaces/" + testNamespaceID + "/agents/" + testAgentID
 	responses["GET "+agentPath+"/revisions"] = `raw:200 {"data":[{"id":"` + testRevision2ID + `","revision":2,"createdAt":"2026-09-30T01:00:00.000Z"}],"meta":{"requestId":"req_test","nextCursor":"v1.2"}}`
@@ -946,8 +948,21 @@ func TestAgentRevisionsPagesWithCursor(t *testing.T) {
 	if !strings.Contains(out, testRevision2ID) || strings.Contains(out, testRevision1ID) {
 		t.Fatalf("expected only the page's revision:\n%s", out)
 	}
-	if !strings.Contains(notices, "occ agent revisions "+testAgentID+" --limit 1 --cursor v1.2") {
+	if !strings.Contains(notices, "agent revisions "+testAgentID+" --limit 1 --cursor v1.2") {
 		t.Fatalf("expected a next-page hint that keeps --limit: %q", notices)
+	}
+	_, continuation, found := strings.Cut(notices, `older revisions may exist; run "`)
+	if !found {
+		t.Fatalf("missing next-page command: %q", notices)
+	}
+	continuation, _, _ = strings.Cut(continuation, `"`)
+	responses["GET "+agentPath+"/revisions"] = `raw:200 {"data":[{"id":"` + testRevision1ID + `","revision":1,"createdAt":"2026-09-30T00:00:00.000Z"}],"meta":{"requestId":"req_test","nextCursor":null}}`
+	nextOut, nextRequested, err := runOCC(t, responses, strings.Fields(continuation)[1:]...)
+	if err != nil {
+		t.Fatalf("advertised next-page command failed: %v", err)
+	}
+	if !slices.Contains(nextRequested, "GET "+agentPath+"/revisions?cursor=v1.2&limit=1") || !strings.Contains(nextOut, testRevision1ID) {
+		t.Fatalf("next-page command lost the selected Namespace, limit, or cursor: %v\n%s", nextRequested, nextOut)
 	}
 	for _, limit := range []string{"0", "101"} {
 		if _, _, err := runOCC(t, responses, "--namespace", testNamespaceID, "agent", "revisions", testAgentID, "--limit", limit); err == nil {

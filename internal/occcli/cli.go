@@ -822,7 +822,7 @@ func (app *application) agentCommand() *cobra.Command {
 				if command.Flags().Changed("limit") {
 					limit = fmt.Sprintf(" --limit %d", revisionLimit)
 				}
-				noticef(command.ErrOrStderr(), "notice: older revisions may exist; run \"occ agent revisions %s%s --cursor %s\"", args[0], limit, page.NextCursor)
+				noticef(command.ErrOrStderr(), "notice: older revisions may exist; run \"occ --namespace %s agent revisions %s%s --cursor %s\"", namespace, args[0], limit, page.NextCursor)
 			}
 			return nil
 		},
