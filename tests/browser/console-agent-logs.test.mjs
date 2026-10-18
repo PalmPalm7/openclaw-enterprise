@@ -230,6 +230,30 @@ test("phone-width routes, resizing and history keep the selected Agent tab visib
     .getByText("phone-width output")
     .waitFor();
 
+  // An emulated resize applies without waiting for a frame, so script can lay the page out at a
+  // size that never renders. A visibility check at 1440 px forces a layout at that width, where
+  // every tab fits, which clamps the strip's scroll to 0. A 390 px resize applied before the next
+  // frame then leaves the strip's ResizeObserver, which reveals the selected tab, nothing to
+  // report: the strip's width at 390 px is the last size it reported (finding 1727). A browser
+  // window's resize reaches the page with a rendered frame, so each resize here waits for the
+  // frame in which the console's observer sees the new width.
+  async function resize(width, height) {
+    await page.setViewportSize({ width, height });
+    const rendered = await page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          // Observers report in creation order, so in the same frame this one reports after the
+          // console's.
+          const observer = new globalThis.ResizeObserver(() => {
+            observer.disconnect();
+            resolve(globalThis.innerWidth);
+          });
+          observer.observe(globalThis.document.querySelector(".agent-tabs"));
+        }),
+    );
+    assert.equal(rendered, width);
+  }
+
   async function assertSelectedTabVisible(name) {
     const selected = page.locator('.agent-tabs button[aria-current="page"]');
     assert.equal(await selected.textContent(), name);
@@ -246,10 +270,10 @@ test("phone-width routes, resizing and history keep the selected Agent tab visib
   // A direct route has no pointer action to scroll its off-screen selected tab.
   await assertSelectedTabVisible("Logs");
   const output = await page.getByRole("log", { name: "Runtime log output" }).elementHandle();
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await resize(1440, 900);
   await assertSelectedTabVisible("Logs");
   // Resizing the mounted view must also reveal the selection without recreating its panel.
-  await page.setViewportSize({ width: 390, height: 844 });
+  await resize(390, 844);
   await assertSelectedTabVisible("Logs");
   assert.equal(await output.evaluate((node) => node.isConnected), true);
   await page.getByRole("button", { name: "Configuration", exact: true }).click();
@@ -272,7 +296,7 @@ test("phone-width routes, resizing and history keep the selected Agent tab visib
   // A whole view retained for Back must resume observing after its tab strip was detached.
   await page.goBack();
   await page.getByRole("log", { name: "Runtime log output" }).waitFor();
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await resize(1440, 900);
   const strip = await page.locator(".agent-tabs").elementHandle();
   await waitForIdleFetches(page);
   await page.getByRole("link", { name: "← Agents", exact: true }).click();
@@ -281,7 +305,7 @@ test("phone-width routes, resizing and history keep the selected Agent tab visib
   await page.goBack();
   await page.locator('.agent-tabs button[aria-current="page"]:enabled').waitFor();
   assert.equal(await strip.evaluate((node) => node.isConnected), true);
-  await page.setViewportSize({ width: 390, height: 844 });
+  await resize(390, 844);
   await assertSelectedTabVisible("Logs");
 });
 
