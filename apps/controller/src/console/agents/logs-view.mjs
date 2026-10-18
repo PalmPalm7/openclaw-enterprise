@@ -157,6 +157,50 @@ const logTimeFormat = new Intl.DateTimeFormat(undefined, {
   timeZoneName: "shortOffset",
 });
 
+// Sizes the pane's time column to the widest timestamp this locale and time zone can show, so
+// every timestamp stays on one line and every row's columns line up (finding 1861: ko-KR, and
+// es-MX or ar-EG with a long UTC offset, overflowed a column sized for en-US). The last day of
+// each month at every hour covers two-digit days and months, each hour and day period, and
+// every UTC offset of the year (daylight saving, Lord Howe's half hour, GMT vs GMT+1). Measured
+// once, in the pane's font: the probe is as wide as its widest line. Returns whether the column
+// is sized; a pane that is not laid out yet measures nothing.
+export function fitLogTimeColumn(pane) {
+  if (pane.style.getPropertyValue("--log-time-width") !== "") {
+    return true;
+  }
+  if (!pane.isConnected || pane.clientWidth === 0) {
+    return false;
+  }
+  const year = new Date().getFullYear();
+  const shown = new Set();
+  for (let month = 0; month < 12; month += 1) {
+    const day = new Date(year, month + 1, 0).getDate();
+    for (let hour = 0; hour < 24; hour += 1) {
+      shown.add(logTimeFormat.format(new Date(year, month, day, hour, 59, 59)));
+    }
+  }
+  const probe = element(
+    "span",
+    { className: "log-time-probe", "aria-hidden": "true" },
+    ...[...shown].map((text) => element("span", {}, text)),
+  );
+  pane.append(probe);
+  const widest = probe.getBoundingClientRect().width;
+  probe.remove();
+  if (widest === 0) {
+    return false;
+  }
+  // Shrunk text does not scale exactly with its font size (CJK glyph advances round), so the
+  // column keeps 4 px of slack, which the shrinking text leaves free (console.css .log-time-text).
+  const natural = Math.ceil(widest);
+  pane.style.setProperty("--log-time-width", `${natural + 4}px`);
+  pane.style.setProperty("--log-time-ems", String(natural / 11));
+  // Wider than en-US's longest form (about 218 px): the message moves below the time in a
+  // wider card, so it keeps 200 px (console.css data-long-time).
+  pane.toggleAttribute("data-long-time", natural > 220);
+  return true;
+}
+
 function formatLogTime(time) {
   if (!time) {
     return "—";
@@ -199,7 +243,11 @@ export function recordRow(record) {
   const summary = element(
     "span",
     { className: "log-line" },
-    element("span", { className: "log-time" }, formatLogTime(record.time)),
+    element(
+      "span",
+      { className: "log-time" },
+      element("span", { className: "log-time-text" }, formatLogTime(record.time)),
+    ),
     element("span", { className: `log-level log-level-${record.level}` }, record.level),
     element(
       "span",

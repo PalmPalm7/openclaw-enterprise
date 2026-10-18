@@ -2708,9 +2708,16 @@ summary:focus-visible {
   /* Reserve room for UNKNOWN so the columns after shorter level labels stay aligned, even when
      the row is short of room. */
   --log-level-column: minmax(6.5em, max-content);
-  /* Fit a whole en-US timestamp with its UTC offset on one line (finding 1681): 33 characters of
-     the 11px time, as in "12/31/2026, 12:59:59 PM GMT+10:30". ch is the row's 12px character. */
-  --log-time-column: calc(33ch * 11 / 12);
+  /* Fit a whole timestamp with its UTC offset on one line (findings 1681, 1861). The console
+     measures the widest one its locale and time zone can show and sets --log-time-width (px,
+     with 4 px of slack) and --log-time-ems (the text in 11px ems) on the pane. Until then: 33
+     characters of the 11px time, as in en-US "12/31/2026, 12:59:59 PM GMT+10:30". ch is the
+     row's 12px character. */
+  --log-time-column: var(--log-time-width, calc(33ch * 11 / 12));
+  /* Where the message moves below: the time takes the room the level (6.5em), the narrowest
+     origin (60px) and two 10px gaps leave, up to its width, and any room beyond. In a card too
+     narrow for a long timestamp its text shrinks to fit (.log-time-text). */
+  --log-time-track: minmax(min(var(--log-time-column), 100% - 6.5em - 80px), 1fr);
   display: grid;
   grid-template-columns:
     var(--log-time-column) var(--log-level-column) minmax(72px, 112px)
@@ -2719,9 +2726,26 @@ summary:focus-visible {
   gap: 12px;
 }
 .log-time {
+  /* A size container, so the text below can shrink to a cell narrower than the measured width
+     (a phone layout with a long timestamp, such as ko-KR "2026. 12. 31. 오후 12시 59분 59초
+     GMT+10:30") instead of wrapping. Each row's cell is the same width, so columns stay aligned. */
+  container-type: inline-size;
   color: var(--muted);
   font-size: 11px;
-  white-space: normal;
+}
+.log-time-text {
+  font-size: min(11px, (100cqi - 4px) / var(--log-time-ems, 19.4));
+  white-space: nowrap;
+}
+.log-time-probe {
+  position: absolute;
+  visibility: hidden;
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.log-time-probe > span {
+  display: block;
 }
 .log-level {
   width: fit-content;
@@ -2830,12 +2854,12 @@ summary:focus-visible {
   }
 }
 /* In a card narrower than 662 px a whole timestamp would leave the message column under 200 px
-   (48 px row padding, 218 px time, 78 px level, 88 px origin and 30 px of gaps), so the message
-   moves below the time, level and origin, as it does on phones (findings 1681, 1713). */
+   (48 px row padding, en-US's 218 px time, 78 px level, 88 px origin and 30 px of gaps), so the
+   message moves below the time, level and origin, as it does on phones (findings 1681, 1713). */
 @container log-viewer (width < 662px) {
   .log-line {
     grid-template-columns:
-      minmax(var(--log-time-column), 1fr) var(--log-level-column)
+      var(--log-time-track) var(--log-level-column)
       minmax(60px, 112px);
     gap: 4px 10px;
   }
@@ -2844,10 +2868,24 @@ summary:focus-visible {
     margin-top: 2px;
   }
 }
-/* A whole timestamp beside the level needs 40 px phone row padding, 218 px time, 10 px gap and
-   up to 78 px for the level. In a narrower card (a window under about 400 px) the time takes
-   its own line, down to a 320 px window, and the level moves beside the origin (finding 1844).
-   The .log-row prefix outranks the phone rules below. */
+/* A pane whose measured timestamps are wider than en-US's (data-long-time, finding 1861) moves
+   the message below up to a 762 px card too, so the message column keeps 200 px. */
+@container log-viewer (662px <= width < 762px) {
+  .log-pane[data-long-time] .log-line {
+    grid-template-columns:
+      var(--log-time-track) var(--log-level-column)
+      minmax(60px, 112px);
+    gap: 4px 10px;
+  }
+  .log-pane[data-long-time] .log-content {
+    grid-column: 1 / -1;
+    margin-top: 2px;
+  }
+}
+/* A whole en-US timestamp beside the level needs 40 px phone row padding, 218 px time, 10 px
+   gap and up to 78 px for the level. In a narrower card (a window under about 400 px) the time
+   takes its own line, down to a 320 px window, and the level moves beside the origin (finding
+   1844). A longer timestamp shrinks to fit. The .log-row prefix outranks the phone rules below. */
 @container log-viewer (width < 346px) {
   .log-row .log-line {
     grid-template-columns: var(--log-level-column) minmax(0, 1fr);
@@ -2869,7 +2907,7 @@ summary:focus-visible {
   }
   .log-line {
     grid-template-columns:
-      minmax(var(--log-time-column), 1fr) var(--log-level-column)
+      var(--log-time-track) var(--log-level-column)
       minmax(60px, 112px);
     gap: 4px 10px;
   }
@@ -2910,7 +2948,9 @@ summary:focus-visible {
     padding-left: 28px;
   }
   .log-line {
-    grid-template-columns: minmax(0, 1fr) max-content;
+    /* The reserved level column gives every row's time the same width, so a shrunk timestamp
+       has one size in every row (finding 1861). */
+    grid-template-columns: minmax(0, 1fr) var(--log-level-column);
   }
   .log-origin {
     grid-column: 1 / -1;
