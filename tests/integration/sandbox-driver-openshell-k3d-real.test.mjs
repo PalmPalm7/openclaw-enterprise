@@ -36,11 +36,13 @@ import {
   openShellAgentName,
   openShellGatewayName,
   openshellHash as hash,
+  failedRecoveryDiagnostic,
   outageAttemptRead,
   registerOpenShellInstallationCleanups,
 } from "../helpers/openshell-kubernetes-real.mjs";
 import {
   boundedTeardown,
+  deleteNamespaceExplained,
   diagnosticDeadlineMs,
   diagnosticDeadlinePassed,
   diagnosticRequestTimeout,
@@ -2335,14 +2337,7 @@ async function prepareProductionInstallation(
     observerPool: () => observerPool.end(),
     workloadNamespace: async () => {
       if (placement !== undefined) {
-        await kubectl(
-          "delete",
-          "namespace",
-          placement,
-          "--ignore-not-found=true",
-          "--wait=true",
-          "--timeout=120s",
-        );
+        await deleteNamespaceExplained(kubectl, placement);
       }
     },
     temporaryDirectory: () => rm(directory, { recursive: true, force: true }),
@@ -6089,6 +6084,14 @@ async function assertOpenShellGatewayOutage(topology) {
   } catch (error) {
     failure = error;
   }
+  // Finding 2017: a held deployment that ends failed (RUNTIME_LOGIN_FAILED) says why.
+  const recoveryDiagnostic = activated
+    ? ""
+    : await failedRecoveryDiagnostic({
+        readWorker: () => topology.diagnoseRevision(redeployed.data.id),
+        describe: (worker) => replacementActivationDiagnostic(topology, redeployed.data, worker),
+        failure,
+      });
   const work = await observerPool.query(
     "SELECT state, reason_code, attempt_count FROM occ.controller_work WHERE idempotency_key = $1",
     [`agent_revision:${redeployed.data.id}:reconcile`],
@@ -6181,7 +6184,11 @@ async function assertOpenShellGatewayOutage(topology) {
   assert.equal(observed.redeployDuringOutage.status, "queued");
   assert.equal(observed.redeployDuringOutage.activeRevisionUnchanged, true);
   // Once the gateway is back, the held deployment proceeds without operator action.
-  assert.equal(observed.recovery.redeployActivated, true, JSON.stringify(observed.recovery));
+  assert.equal(
+    observed.recovery.redeployActivated,
+    true,
+    `${JSON.stringify(observed.recovery)}${recoveryDiagnostic}`,
+  );
   assert.equal(observed.recovery.sourceState, "ready");
   assert.equal(observed.recovery.turn, true, "the new revision must serve a model turn.");
   for (const { type, afterRestart, rotated } of observed.recovery.refresh) {

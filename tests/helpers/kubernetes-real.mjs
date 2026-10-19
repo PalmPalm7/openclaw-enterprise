@@ -119,6 +119,127 @@ export async function withinDiagnosticDeadline(
   }
 }
 
+// Deletes a Namespace and waits for it. A delete that fails (a finalizer holding the Namespace
+// past the timeout, say) says before it fails what holds it (finding 2018): the Namespace's
+// phase, finalizers and status conditions, and every object still in it with its finalizers and
+// deletion time. The listing runs within the diagnostic deadline and only adds to the delete's
+// own error.
+export async function deleteNamespaceExplained(
+  kubectl,
+  namespace,
+  // The listing's own bound keeps the delete and the listing within teardownStepLimitMs, so the
+  // teardown never abandons the step and loses the listing with it.
+  { timeout = "120s", listTimeoutMs = 40_000 } = {},
+) {
+  try {
+    return await kubectl(
+      "delete",
+      "namespace",
+      namespace,
+      "--ignore-not-found=true",
+      "--wait=true",
+      `--timeout=${timeout}`,
+    );
+  } catch (error) {
+    const remains = await withinDiagnosticDeadline(
+      () => describeNamespaceRemains(kubectl, namespace),
+      { timeoutMs: listTimeoutMs, timedOut: "listing what remains timed out" },
+    ).catch((listError) => `listing what remains failed: ${listError?.message ?? listError}`);
+    error.message = `${error.message}\nNamespace ${namespace} remains: ${remains}`;
+    throw error;
+  }
+}
+
+// Objects a failed Namespace delete lists, at most; the rest are counted.
+const namespaceRemainsLimit = 40;
+// Only object metadata is printed, never a Secret's or ConfigMap's data.
+const namespaceRemainsTemplate =
+  '{range .items[*]}{.kind}/{.metadata.name} finalizers={.metadata.finalizers} deleting={.metadata.deletionTimestamp}{"\\n"}{end}';
+
+// A kubectl read that printed what it could before failing (one unavailable aggregated API fails
+// discovery and a multi-kind get, but kubectl still prints the rest): its stdout, and its error's
+// first stderr line in `lines`.
+async function partialKubectlRead(kubectl, args, lines, what) {
+  try {
+    return { output: await kubectl(...args), complete: true };
+  } catch (error) {
+    const reason = String(error?.stderr || error?.message || error)
+      .trim()
+      .split("\n")[0]
+      .slice(0, 300);
+    lines.push(`${what} failed: ${reason}`);
+    return { output: String(error?.stdout ?? ""), complete: false };
+  }
+}
+
+async function describeNamespaceRemains(kubectl, namespace) {
+  let state;
+  try {
+    state = JSON.parse(
+      await kubectl("get", "namespace", namespace, "-o", "json", diagnosticRequestTimeout),
+    );
+  } catch (error) {
+    if (/\(NotFound\)/.test(String(error?.stderr ?? ""))) {
+      return "none (the Namespace is gone)";
+    }
+    throw error;
+  }
+  const lines = [
+    `phase ${state.status?.phase ?? "unknown"}, finalizers [${(state.spec?.finalizers ?? []).join(", ")}]`,
+    ...(state.status?.conditions ?? []).map(
+      (condition) =>
+        `condition ${condition.type}=${condition.status} ${condition.reason ?? ""}: ${condition.message ?? ""}`,
+    ),
+  ];
+  const discovery = await partialKubectlRead(
+    kubectl,
+    ["api-resources", "--namespaced=true", "--verbs=list", "-o", "name", diagnosticRequestTimeout],
+    lines,
+    "listing kinds",
+  );
+  const kinds = discovery.output
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    // Events describe the delete, they don't hold it.
+    .filter((kind) => !/^events(\.events\.k8s\.io)?$/.test(kind));
+  if (kinds.length === 0) {
+    return lines.join("\n  ");
+  }
+  const listed = await partialKubectlRead(
+    kubectl,
+    [
+      "get",
+      kinds.join(","),
+      "--namespace",
+      namespace,
+      "--ignore-not-found=true",
+      "-o",
+      `jsonpath=${namespaceRemainsTemplate}`,
+      diagnosticRequestTimeout,
+    ],
+    lines,
+    "listing objects",
+  );
+  const objects = listed.output
+    .split("\n")
+    .map((line) =>
+      line
+        .trim()
+        .replace(/ finalizers=(?= |$)/, "")
+        .replace(/ deleting=$/, ""),
+    )
+    .filter(Boolean);
+  lines.push(...objects.slice(0, namespaceRemainsLimit));
+  if (objects.length > namespaceRemainsLimit) {
+    lines.push(`and ${objects.length - namespaceRemainsLimit} more objects`);
+  }
+  if (objects.length === 0 && discovery.complete && listed.complete) {
+    lines.push("no objects left in it");
+  }
+  return lines.join("\n  ");
+}
+
 // node:test runs a test's after hooks in registration order and skips the rest once one throws
 // (finding 1711). A test that registers a Namespace delete first and its worker stop last deletes
 // the worker's ServiceAccount under a running worker, and an early hook that fails skips the stop:
