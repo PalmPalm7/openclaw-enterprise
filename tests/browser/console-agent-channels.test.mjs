@@ -148,6 +148,17 @@ describe("Agent channels", { concurrency: 3 }, () => {
 
     await page.getByRole("button", { name: "Edit Slack" }).click();
     const dialog = page.getByRole("dialog", { name: "Edit Slack" });
+    // The drawer's standing notice is info, not a warning (finding 2006).
+    assert.deepEqual(
+      await dialog
+        .getByText(/^New version\. Changes affect future deployments/)
+        .evaluate((node) => ({
+          className: node.className,
+          tone: node.dataset.tone ?? null,
+          role: node.getAttribute("role"),
+        })),
+      { className: "status", tone: "info", role: "status" },
+    );
     const appSecretPath = `/namespaces/${namespace.id}/secrets/${slackAppSecret.id}`;
     const botSecretPath = `/namespaces/${namespace.id}/secrets/${slackBotSecret.id}`;
     const appSecretLink = dialog.getByRole("link", {
@@ -653,6 +664,45 @@ describe("Agent channels", { concurrency: 3 }, () => {
       false,
     );
     assert.equal(await dialog.getByLabel("Require a mention", { exact: true }).isChecked(), false);
+  });
+
+  test("Channel drawer refuses to keep a channel enabled for an Embedded Agent", async (t) => {
+    const { fixture, namespace } = await readyNamespace(t, "Embedded Slack");
+    // An Embedded OpenClaw Agent whose Configuration was then given an enabled Slack channel: the
+    // Configuration API accepts it, while the Agent cannot serve it (Agent save and deploy refuse).
+    const values = nativeValues("embedded-slack");
+    const agent = await fixture.createAgent(namespace.id, "Embedded Slack Agent", values);
+    assert.equal(agent.executionMode, "embedded");
+    await fixture.updateConfiguration(namespace.id, agent.configurationId, {
+      ...values,
+      channels: {
+        slack: {
+          enabled: true,
+          mode: "socket",
+          appToken: { source: "env", provider: "default", id: "SLACK_APP_TOKEN" },
+          botToken: { source: "env", provider: "default", id: "SLACK_BOT_TOKEN" },
+        },
+      },
+    });
+    const { page } = await newPage(t, fixture, { browser });
+    const requests = apiRequests(page, fixture.origin);
+
+    await openDraft(page, fixture, agent, "Embedded Slack Agent");
+    await page.getByRole("button", { name: "Edit Slack" }).click();
+    const dialog = page.getByRole("dialog", { name: "Edit Slack" });
+    await dialog.getByRole("button", { name: "Save configuration", exact: true }).click();
+    // A refusal is a danger alert (finding 2006), and nothing is written.
+    const refusal = dialog.getByText("Channels require Dedicated execution.", { exact: true });
+    await refusal.waitFor();
+    assert.deepEqual(
+      await refusal.evaluate((node) => ({
+        className: node.className,
+        tone: node.dataset.tone ?? null,
+        role: node.getAttribute("role"),
+      })),
+      { className: "status", tone: "danger", role: "alert" },
+    );
+    assert.deepEqual(nonAuthWriteRequests(requests), []);
   });
 
   test("Channel drawer reports partial save when post-PATCH Secret grant is rejected", async (t) => {
