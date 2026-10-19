@@ -315,8 +315,17 @@ export function renderWorkspaceFiles(context, agent, path) {
       if (!context.isCurrent() || operations !== started || pending || editor.value !== shown) {
         return;
       }
-      // An identical value leaves the caret where it was.
+      // An identical value leaves the caret where it was. A different one moves it to the end, where
+      // the next key would land, so a reader who clicked into the file without editing gets caret
+      // and scroll back at the same offsets; setSelectionRange clamps them to the new length
+      // (finding 1889).
+      const focused = editor.ownerDocument.activeElement === editor;
+      const { selectionStart, selectionEnd, selectionDirection, scrollTop } = editor;
       editor.value = file.content;
+      if (focused && editor.value !== shown) {
+        editor.setSelectionRange(selectionStart, selectionEnd, selectionDirection);
+        editor.scrollTop = scrollTop;
+      }
       baseline = editor.value;
       if (missing || baseline !== shown) {
         error.textContent = "";
