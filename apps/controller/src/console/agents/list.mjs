@@ -325,16 +325,24 @@ export function renderAgentList(context) {
     tone: "primary",
   });
   create.disabled = createDenied || notReady?.blocked === true;
-  if (notReady?.blocked) {
+  // A provisioning Namespace still takes drafts, so Create Agent stays enabled, and says why
+  // nothing deploys yet (finding 1990).
+  if (notReady) {
     create.setAttribute("aria-describedby", "namespace-not-ready");
   }
   view.replaceChildren(
     element("div", { className: "agent-toolbar" }, search, create),
     ...(notReady
       ? [
+          // A warning status block (dom.mjs statusBlock's markup), a polite status on load.
           element(
             "p",
-            { className: "muted", role: "status", id: "namespace-not-ready" },
+            {
+              className: "status",
+              "data-tone": "warning",
+              role: "status",
+              id: "namespace-not-ready",
+            },
             notReady.note,
           ),
         ]
@@ -477,7 +485,9 @@ export function renderAgentList(context) {
                   ? context.namespace.status === "provisioning"
                     ? "You can create Agents here once this Namespace is ready."
                     : "Agents cannot be created in this Namespace."
-                  : "Create an Agent in this Namespace using an editable Configuration template.",
+                  : notReady
+                    ? "You can save an Agent draft here now. It can be deployed once this Namespace is ready."
+                    : "Create an Agent in this Namespace using an editable Configuration template.",
           ),
         ),
       );
