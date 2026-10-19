@@ -6,7 +6,9 @@ import {
   jsonObjectProblem,
   patchChildren,
   setHidden,
+  setStatusTone,
   setText,
+  statusBlock,
 } from "../dom.mjs";
 import {
   configuredHarnessId,
@@ -260,7 +262,7 @@ function deploymentFailure(error) {
   return element(
     "div",
     {},
-    element("p", { className: "error", role: "alert" }, `${error.code}: ${error.message}`),
+    statusBlock("danger", null, `${error.code}: ${error.message}`),
     preparation
       ? element(
           "div",
@@ -609,7 +611,7 @@ function createDeploymentStatusPanel(context, path, revision, onAgentChange, onS
 
   function renderStatus() {
     if (state.error) {
-      return element("p", { className: "error", role: "alert" }, message(state.error));
+      return statusBlock("danger", null, message(state.error));
     }
     if (!state.status) {
       return element("p", { className: "muted" }, "Deployment status has not loaded.");
@@ -657,9 +659,8 @@ function createDeploymentStatusPanel(context, path, revision, onAgentChange, onS
       ),
       state.status.error ? deploymentResult(state.status) : null,
       state.status.warnings?.length
-        ? element(
-            "div",
-            { className: "deployment-warnings" },
+        ? statusBlock(
+            "warning",
             element("h3", {}, "Startup warnings"),
             element(
               "ul",
@@ -668,6 +669,8 @@ function createDeploymentStatusPanel(context, path, revision, onAgentChange, onS
                 element("li", {}, pluginWarningText(warning)),
               ),
             ),
+            [],
+            { role: null },
           )
         : null,
     );
@@ -705,9 +708,9 @@ function createDeploymentStatusPanel(context, path, revision, onAgentChange, onS
       renderStatus(),
       ...(state.overviewError
         ? [
-            element(
-              "p",
-              { className: "error", role: "alert" },
+            statusBlock(
+              "danger",
+              null,
               "Current version and version history could not be refreshed. Use the page Refresh control to retry.",
             ),
           ]
@@ -827,7 +830,7 @@ function createVersionDeploymentRecord(
         }),
       ),
       error
-        ? element("p", { className: "error", role: "alert" }, message(error))
+        ? statusBlock("danger", null, message(error))
         : status
           ? element(
               "div",
@@ -1079,14 +1082,16 @@ function createVersionDiagnosticsPanel(context, path, revisionId, recordedStatus
       ),
       ...(error
         ? [
-            element(
-              "p",
-              { className: "error", role: "alert", ...describedOutcome() },
+            statusBlock(
+              "danger",
+              null,
               error.status === 403
                 ? "Diagnostics require Agent read and operate access plus read access to this version. Ask a Namespace administrator to confirm those grants."
                 : error.status === 503
                   ? "Current-runtime diagnostics are unavailable. This Compute Driver may not support them, or the runtime may be unreachable. Check the runtime and try again."
                   : message(error),
+              [],
+              describedOutcome(),
             ),
           ]
         : []),
@@ -1281,7 +1286,11 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       liveServingNote,
     ),
   );
-  const statusLine = element("p", { className: "agent-status-line", hidden: true });
+  const statusLine = statusBlock("warning", null, null, [], {
+    className: "agent-status-line",
+    role: null,
+    hidden: true,
+  });
   // Revision read is granted per version, so someone who may deploy can still be
   // unable to read the version that is now current, or the one they just requested.
   function revisionHidden(revisionId) {
@@ -1379,7 +1388,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   // A refused leave says why beside the control whose request holds the page (finding 1962).
   // The configuration, channels and repositories editors write their block into their own
   // feedback; every other hold writes it here.
-  const leaveNote = element("p", { className: "hint", role: "status" });
+  const leaveNote = statusBlock("info", null, null);
   let leaveNoteText = null;
   // The authentication form, whose save holds the page from the Credentials tab.
   let authenticationLeaveAnchor = null;
@@ -1954,22 +1963,14 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
         newVersion,
         list,
         olderError
-          ? element(
-              "p",
-              { className: "error", role: "alert" },
-              `Older versions unavailable. ${message(olderError)}`,
-            )
+          ? statusBlock("danger", null, `Older versions unavailable. ${message(olderError)}`)
           : null,
         revisions.length || selected !== "draft"
           ? element("label", { for: "revision-selector" }, "Available versions")
           : null,
         revisions.length || selected !== "draft" ? chooser : null,
         historyError
-          ? element(
-              "p",
-              { className: "error", role: "alert" },
-              `Version history unavailable. ${message(historyError)}`,
-            )
+          ? statusBlock("danger", null, `Version history unavailable. ${message(historyError)}`)
           : null,
         !historyError && !revisions.length
           ? element(
@@ -2793,7 +2794,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     }
     refreshDeployControls = updateDeployControls;
     deployStatus = element("p", { className: "muted", role: "status" });
-    deployFeedback = element("p", { className: "error", role: "alert" });
+    deployFeedback = statusBlock("danger", null, null);
     deploy = button(
       "Deploy new version",
       async () => {
@@ -3367,11 +3368,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   function renderConfigurationTab(context, selectedTab, data) {
     const { snapshot, values, draft, executionMode, credentials, channelSecretsNote } = data;
     content.append(
-      element(
-        "p",
-        { className: "notice version-selection-notice", role: "status" },
-        versionNotice(),
-      ),
+      statusBlock("info", null, versionNotice(), [], { className: "version-selection-notice" }),
     );
     if (selectedTab === "repositories" && draft) {
       content.append(renderRepositoryEditor(context, data));
@@ -4131,7 +4128,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       editor.value = initialText;
       editorError.clear();
       feedback.textContent = "";
-      feedback.className = "hint";
+      setStatusTone(feedback, null);
       reloadRequired = false;
       setDraftEditorState({
         dirty: false,
@@ -4201,12 +4198,12 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       if (outcomeUnknown) {
         feedback.textContent =
           "Outcome unknown. Configuration may have been saved. Reload this draft before saving again.";
-        feedback.className = "error";
+        setStatusTone(feedback, "danger");
         feedbackLocked = true;
       } else if (reloadRequired) {
         if (!feedbackLocked) {
           feedback.textContent = "Reload this draft before saving again.";
-          feedback.className = "error";
+          setStatusTone(feedback, "danger");
         }
         feedbackLocked = true;
       } else if (pending) {
@@ -4227,7 +4224,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     editor.addEventListener("input", () => {
       editorError.clear();
       feedback.textContent = "";
-      feedback.className = "hint";
+      setStatusTone(feedback, null);
       feedbackLocked = false;
       reloadRequired = false;
       updateState();
@@ -4235,7 +4232,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     showDraftEditorNavigationBlock = () => {
       if (draftEditorNavigationBlock) {
         feedback.textContent = draftEditorNavigationBlock;
-        feedback.className = "hint";
+        setStatusTone(feedback, null);
         feedbackLocked = true;
       }
     };
@@ -4251,7 +4248,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       }
       pending = true;
       feedback.textContent = "Checking Configuration…";
-      feedback.className = "hint";
+      setStatusTone(feedback, null);
       feedbackLocked = true;
       const saveFocused = document.activeElement === save;
       updateState();
@@ -4278,7 +4275,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
           freshConfig.generation !== baseline.generation
         ) {
           feedback.textContent = CONFIGURATION_CHANGED;
-          feedback.className = "error";
+          setStatusTone(feedback, "danger");
           feedbackLocked = true;
           reloadRequired = true;
           return;
@@ -4313,7 +4310,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
         }
         if (isStaleGeneration(error) && mutationStarted && !configurationSaved) {
           feedback.textContent = CONFIGURATION_CHANGED;
-          feedback.className = "error";
+          setStatusTone(feedback, "danger");
           feedbackLocked = true;
           reloadRequired = true;
           return;
@@ -4321,7 +4318,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
         feedback.textContent =
           configurationConflictMessage(error, mutationStarted && !configurationSaved) ??
           rejectionMessage(error, mutationStarted);
-        feedback.className = "error";
+        setStatusTone(feedback, "danger");
         feedbackLocked = true;
         outcomeUnknown = mutationStarted && ![400, 403, 404, 409, 429].includes(error.status);
       } finally {
