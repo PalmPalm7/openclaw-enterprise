@@ -306,12 +306,16 @@ test("A failed older version raises no recovery while the current version is hid
 });
 
 // One readable version per history page: the first page lists the newest readable version.
-function routeOneVersionPerPage(page, fixture, namespace, agent) {
+// `olderRead`, when given, is told of each older-page request and answers when it resolves.
+function routeOneVersionPerPage(page, fixture, namespace, agent, olderRead) {
   const revisionsPath = `/namespaces/${namespace.id}/agents/${agent.id}/revisions`;
   return page.route(
     (url) => url.origin === fixture.origin && url.pathname === revisionsPath,
     async (route) => {
       const cursor = new URL(route.request().url()).searchParams.get("cursor");
+      if (cursor === "older-page") {
+        await olderRead?.();
+      }
       const response = await route.fetch({ url: `${fixture.origin}${revisionsPath}` });
       const body = await response.json();
       await route.fulfill({
@@ -335,7 +339,22 @@ test("A failed version raises no recovery while the current version is on no loa
   const third = await fixture.seedActiveAgentRevision(namespace.id, agent.id, second.revision.id);
   denyRevisionRead(fixture, namespace, third.revision);
   await routeFailedRecord(page, fixture, namespace, agent, second.revision);
-  await routeOneVersionPerPage(page, fixture, namespace, agent);
+  // The older page is held until the test releases it.
+  let olderRequests = 0;
+  let olderRequested;
+  const requested = new Promise((resolve) => {
+    olderRequested = resolve;
+  });
+  let releaseOlder;
+  const olderGate = new Promise((resolve) => {
+    releaseOlder = resolve;
+  });
+  await routeOneVersionPerPage(page, fixture, namespace, agent, () => {
+    olderRequests += 1;
+    olderRequested();
+    return olderGate;
+  });
+  await trackSettledFetches(page);
 
   await login(page, fixture, detailUrl(fixture, namespace.id, agent.id, "draft", "configuration"));
   await page.getByRole("heading", { name: "Paged history" }).waitFor();
@@ -351,9 +370,50 @@ test("A failed version raises no recovery while the current version is on no loa
   assert.equal(await page.getByRole("link", { name: "Open v2 Logs" }).count(), 0);
   assert.equal(await page.getByRole("link", { name: "Open Configuration" }).count(), 0);
 
+  // Show older versions follows the Versions list rather than sitting in it: the arrows stay on
+  // versions and Tab reaches it next. Focus stays on it while it loads, then moves to the first
+  // older version, scrolled into view (finding 2115). A short list makes v1 overflow it.
+  await page.evaluate(() => {
+    const sheet = [...globalThis.document.styleSheets].find((item) => item.href);
+    sheet.insertRule(".version-list { max-height: 100px; }", sheet.cssRules.length);
+  });
+  const rail = page.getByRole("toolbar", { name: "Versions" });
+  assert.equal(await rail.getByRole("button", { name: "Show older versions" }).count(), 0);
+  await rail.getByRole("button", { name: /^View version v2/ }).focus();
+  await page.keyboard.press("Tab");
+  const focusedName = () =>
+    page.evaluate(() => {
+      const active = globalThis.document.activeElement;
+      return active.getAttribute("aria-label") ?? active.textContent;
+    });
+  assert.equal(await focusedName(), "Show older versions");
+  // While the older page loads, focus stays on the busy button, and pressing it again sends
+  // nothing more.
+  await page.keyboard.press("Enter");
+  await requested;
+  const loading = page.getByRole("button", { name: "Loading older versions…" });
+  await loading.waitFor();
+  assert.equal(await focusedName(), "Loading older versions…");
+  assert.equal(await loading.getAttribute("aria-disabled"), "true");
+  await page.keyboard.press("Enter");
   // With every page loaded, the current version is known to be hidden.
-  await page.getByRole("button", { name: "Show older versions" }).click();
-  await page.getByRole("button", { name: /^View version v1/ }).waitFor();
+  releaseOlder();
+  await rail.getByRole("button", { name: /^View version v1/ }).waitFor();
+  await waitForIdleFetches(page);
+  assert.equal(olderRequests, 1);
+  assert.equal(await focusedName(), "View version v1");
+  assert.deepEqual(
+    await rail.evaluate((list) => {
+      const box = list.getBoundingClientRect();
+      const item = globalThis.document.activeElement.getBoundingClientRect();
+      return {
+        overflows: list.scrollHeight > list.clientHeight,
+        visible: item.top >= box.top && item.bottom <= box.bottom,
+      };
+    }),
+    { overflows: true, visible: true },
+  );
+  assert.equal(await page.getByRole("button", { name: "Show older versions" }).count(), 0);
   await statusLine
     .getByText(
       /The current version, rev_.*, is one you cannot read, so this page cannot tell whether the failed v2 deployment affects it\. Ask an Agent administrator for read access/,
@@ -361,6 +421,52 @@ test("A failed version raises no recovery while the current version is on no loa
     .waitFor();
   assert.equal(await page.locator(".deployment-recovery").isHidden(), true);
   assert.equal(await page.getByText("v2 deployment failed").count(), 0);
+});
+
+// A viewed version on no loaded page shows on its own below the list. When Show older versions
+// loads the page that holds it, focus goes to the first newly listed version, not the viewed
+// one that was already shown (finding 2115).
+test("Show older versions hands focus to the first version it lists", async (t) => {
+  const { fixture, namespace, agent, page } = await agentPage(t, "Paged viewed", "Paged viewed");
+  const first = await fixture.seedActiveAgentRevision(namespace.id, agent.id);
+  const second = await fixture.seedActiveAgentRevision(namespace.id, agent.id, first.revision.id);
+  await fixture.seedActiveAgentRevision(namespace.id, agent.id, second.revision.id);
+  await routeOneVersionPerPage(page, fixture, namespace, agent);
+  await login(
+    page,
+    fixture,
+    detailUrl(fixture, namespace.id, agent.id, first.revision.id, "configuration"),
+  );
+  const rail = page.getByRole("toolbar", { name: "Versions" });
+  await rail.getByRole("button", { name: "View version v1" }).waitFor();
+  assert.equal(await rail.getByRole("button", { name: /^View version v2/ }).count(), 0);
+  // A short list, so the newly listed version must be scrolled into view.
+  await page.evaluate(() => {
+    const sheet = [...globalThis.document.styleSheets].find((item) => item.href);
+    sheet.insertRule(".version-list { max-height: 100px; }", sheet.cssRules.length);
+  });
+  await rail.getByRole("button", { name: "View version v1" }).focus();
+  await page.keyboard.press("Tab");
+  await page.getByRole("button", { name: "Show older versions" }).waitFor();
+  assert.equal(
+    await page.evaluate(() => globalThis.document.activeElement.textContent),
+    "Show older versions",
+  );
+  await page.keyboard.press("Enter");
+  await rail.getByRole("button", { name: /^View version v2/ }).waitFor();
+  assert.deepEqual(
+    await rail.evaluate((list) => {
+      const active = globalThis.document.activeElement;
+      const box = list.getBoundingClientRect();
+      const item = active.getBoundingClientRect();
+      return {
+        focused: active.getAttribute("aria-label"),
+        overflows: list.scrollHeight > list.clientHeight,
+        visible: item.top >= box.top && item.bottom <= box.bottom,
+      };
+    }),
+    { focused: "View version v2", overflows: true, visible: true },
+  );
 });
 
 // A succeeded deployment becomes current, so a different current version on no loaded page may
@@ -2247,24 +2353,34 @@ for (const viewport of [
 // and each version was its own Tab stop, 51 on one Agent (finding 2101). The latest version now
 // carries its deployment's outcome while it is in progress or failed, and the
 // list is one Tab stop on the viewed version: Up/Down (wrapping) and Home/End move focus, Enter
-// opens a version, and Tab leaves the list.
+// opens a version, and Tab leaves the list. A poll that lands the outcome rebuilds the list and
+// keeps focus on the same version (finding 2115).
 test("Versions list marks the latest version's outcome and is one Tab stop", async (t) => {
   const { fixture, namespace, agent, page } = await agentPage(t, "Version rail", "Rail Agent");
   const active = await fixture.seedActiveAgentRevision(namespace.id, agent.id);
   await fixture.deployAgent(namespace.id, agent.id);
   const latest = await fixture.deployAgent(namespace.id, agent.id);
-  let record = deploymentRecord(namespace, agent, latest, "running");
-  await page.route(deploymentUrl(fixture, namespace, agent, latest), (route) =>
-    route.fulfill(record),
-  );
+  const recordUrl = deploymentUrl(fixture, namespace, agent, latest);
+  let record = deploymentRecord(namespace, agent, latest, "queued");
+  await page.route(recordUrl, (route) => route.fulfill(record));
   await page.setViewportSize({ width: 1200, height: 800 });
   await trackSettledFetches(page);
+  await page.clock.install();
   await login(
     page,
     fixture,
     detailUrl(fixture, namespace.id, agent.id, active.revision.id, "configuration"),
   );
   await page.locator('.content [aria-live="polite"][aria-busy="false"]').waitFor();
+  // Polls run only when the test advances the clock.
+  const now = await page.evaluate(() => Date.now());
+  await page.clock.pauseAt(new Date(now + 1000));
+  const poll = async () => {
+    const read = page.waitForResponse(recordUrl);
+    await page.clock.runFor(DEPLOYMENT_POLL_MS);
+    await read;
+    await waitForIdleFetches(page);
+  };
   const rail = page.getByRole("toolbar", { name: "Versions" });
   assert.equal(await rail.getAttribute("aria-orientation"), "vertical");
   const state = () =>
@@ -2282,18 +2398,33 @@ test("Versions list marks the latest version's outcome and is one Tab stop", asy
           : null,
       };
     });
-  await rail.getByRole("button", { name: "View version v3, deployment in progress" }).waitFor();
+  await rail.getByRole("button", { name: "View version v3, deployment queued" }).waitFor();
   const first = await state();
-  assert.deepEqual(first.outcomes, ["In progress/info", null, null]);
+  assert.deepEqual(first.outcomes, ["Queued/info", null, null]);
   assert.deepEqual(first.names, [
-    "View version v3, deployment in progress",
+    "View version v3, deployment queued",
     "View version v2",
     "View version v1, current version",
   ]);
   assert.equal(first.stops.length, 1);
   assert.match(first.stops[0], /^v1/);
 
-  // The deploy fails; Refresh deployment reads it and v3 takes the Failed badge.
+  // A reader arrows to v2 while the deploy runs, then fails: each poll marks v3, and the one that
+  // reads the failure rebuilds the list without taking focus off v2 or scrolling the list. A
+  // short list makes it scroll.
+  await page.evaluate(() => {
+    const sheet = [...globalThis.document.styleSheets].find((item) => item.href);
+    sheet.insertRule(".version-list { max-height: 120px; }", sheet.cssRules.length);
+  });
+  await rail.getByRole("button", { name: "View version v1, current version" }).focus();
+  await page.keyboard.press("ArrowUp");
+  const shownV2 = await rail.getByRole("button", { name: "View version v2" }).elementHandle();
+  const scrolled = await rail.evaluate((list) => list.scrollTop);
+  assert.ok(scrolled > 0, `the list scrolled to v2: ${scrolled}`);
+  record = deploymentRecord(namespace, agent, latest, "running");
+  await poll();
+  await rail.getByRole("button", { name: "View version v3, deployment in progress" }).waitFor();
+  assert.deepEqual((await state()).outcomes, ["In progress/info", null, null]);
   record = deploymentRecord(
     namespace,
     agent,
@@ -2301,14 +2432,27 @@ test("Versions list marks the latest version's outcome and is one Tab stop", asy
     "failed",
     persistedDeploymentError("RUNTIME_MODEL_PROBE_FAILED"),
   );
-  await page
-    .locator(".deployment-status")
-    .getByRole("button", { name: "Refresh deployment" })
-    .click();
+  await poll();
   await rail.getByRole("button", { name: "View version v3, deployment failed" }).waitFor();
-  assert.deepEqual((await state()).outcomes, ["Failed/danger", null, null]);
-  // A poll that read the failure first rereads the Agent and rebuilds the list; let it settle.
-  await waitForIdleFetches(page);
+  const failed = await state();
+  assert.deepEqual(failed.outcomes, ["Failed/danger", null, null]);
+  // The list was rebuilt, and focus and scroll position carried over to the new one.
+  assert.equal(await shownV2.evaluate((node) => node.isConnected), false);
+  assert.equal(failed.focused, "v2");
+  assert.deepEqual(
+    await rail.evaluate((list) => {
+      const box = list.getBoundingClientRect();
+      const item = globalThis.document.activeElement.getBoundingClientRect();
+      return {
+        scrollTop: list.scrollTop,
+        visible: item.top >= box.top && item.bottom <= box.bottom,
+      };
+    }),
+    { scrollTop: scrolled, visible: true },
+  );
+  assert.equal(failed.stops.length, 1);
+  assert.match(failed.stops[0], /^v2/);
+  await page.clock.resume();
 
   // One Tab stop on the viewed version; the arrows move focus without opening a version.
   await rail.getByRole("button", { name: "View version v1, current version" }).focus();

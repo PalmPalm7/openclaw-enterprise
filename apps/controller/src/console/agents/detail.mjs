@@ -507,12 +507,19 @@ function pendingAttempt(attempt) {
 // One Tab stop for a list of version buttons, as in the tab strip (UX plan C7): it sits on the
 // viewed version (else the newest), Up/Down (and Home/End) move focus between versions, and
 // Enter or Space opens one. A rail of 51 versions was 51 Tab stops (finding 2101).
+// It returns a function that moves the Tab stop to an item and focuses it.
 function rovingVersions(list, items) {
   const home = items.find((item) => item.getAttribute("aria-current") === "page") ?? items[0];
   const reset = () => {
     for (const item of items) {
       item.tabIndex = item === home ? 0 : -1;
     }
+  };
+  const focusItem = (target) => {
+    for (const item of items) {
+      item.tabIndex = item === target ? 0 : -1;
+    }
+    target.focus({ preventScroll: true });
   };
   reset();
   list.addEventListener("keydown", (event) => {
@@ -529,10 +536,7 @@ function rovingVersions(list, items) {
     }
     event.preventDefault();
     const target = enabled[(next + enabled.length) % enabled.length];
-    for (const item of items) {
-      item.tabIndex = item === target ? 0 : -1;
-    }
-    target.focus({ preventScroll: true });
+    focusItem(target);
     target.scrollIntoView({ block: "nearest" });
   });
   // Tabbing back in lands on the viewed version, wherever the arrows left focus.
@@ -543,6 +547,7 @@ function rovingVersions(list, items) {
       }
     });
   });
+  return focusItem;
 }
 
 function createDeploymentStatusPanel(context, path, revision, onAgentChange, onStatusChange) {
@@ -2225,6 +2230,12 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
 
   // The rail's version buttons by revision ID, for the outcome badge the latest one carries.
   const versionControls = new Map();
+  // Each rail control's key (a revision ID, "new", "older" or "chooser"), so a rebuild of the
+  // rail gives focus back to the same control instead of dropping it to the page (finding 2115).
+  let railFocusKeys = new Map();
+  // The revisions the rail last listed, not counting a viewed version shown on its own below
+  // them: where the loaded pages ended.
+  let listedRevisionIds = new Set();
   // A version's own deployment outcome beside its number (finding 2095): the rail knows the
   // latest version's record, so a failed or deploying latest version is marked; the others have
   // no record read here and stay plain. The rail may show before that record is read, so the
@@ -2256,6 +2267,12 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     }
   }
   function renderVersions(revisions, snapshot, historyError = null) {
+    const focusKey = railFocusKeys.get(document.activeElement);
+    const listedBefore = listedRevisionIds;
+    listedRevisionIds = new Set(revisions.map((revision) => revision.id));
+    // The rebuilt list keeps the reader's scroll position.
+    const listScroll = selector.querySelector(".version-list")?.scrollTop ?? 0;
+    railFocusKeys = new Map();
     revisionControls.clear();
     versionControls.clear();
     // Opening the draft is navigation. Saving a Configuration and deploying have their own permissions.
@@ -2268,6 +2285,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       },
     );
     trackRevisionControl(newVersion);
+    railFocusKeys.set(newVersion, "new");
     // The versions, the viewed one included, are one Tab stop (finding 2101), so the list is a
     // vertical toolbar: screen readers announce it as one control that the arrows move through.
     const list = element("div", {
@@ -2297,6 +2315,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       );
       control.append(line, element("small", {}, displayDate(revision.createdAt)));
       versionControls.set(revision.id, { control, line, label });
+      railFocusKeys.set(control, revision.id);
       trackRevisionControl(control);
       items.push(control);
       list.append(control);
@@ -2312,6 +2331,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
           element("strong", {}, `v${snapshot.revision}`),
           element("small", {}, "Viewed version"),
         );
+        railFocusKeys.set(control, selected);
         trackRevisionControl(control);
         items.push(control);
         list.append(control);
@@ -2325,16 +2345,22 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
         );
       }
     }
-    rovingVersions(list, items);
-    // Versions list one page at a time, newest first; older pages load on request.
+    const focusVersion = rovingVersions(list, items);
+    // Versions list one page at a time, newest first; older pages load on request. The button
+    // follows the list rather than sitting in it: it loads versions, it is not one, so the arrows
+    // stay on versions and Tab reaches it next (finding 2115). While loading it keeps focus.
+    let older = null;
     if (olderCursor && !historyError) {
-      const older = button(
+      older = button(
         olderLoading ? "Loading older versions…" : "Show older versions",
         () => void loadOlderRevisions(),
-        { className: "version-item version-older", disabled: olderLoading },
+        {
+          className: "version-item version-older",
+          ...(olderLoading ? { "aria-disabled": "true", "aria-busy": "true" } : {}),
+        },
       );
       trackRevisionControl(older);
-      list.append(older);
+      railFocusKeys.set(older, "older");
     }
     const chooser = element(
       "select",
@@ -2358,6 +2384,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       );
     }
     chooser.value = selected;
+    railFocusKeys.set(chooser, "chooser");
     chooser.addEventListener("change", () => {
       const nextRevision = chooser.value;
       if (draftEditorBlocksNavigation() || sharingWrite) {
@@ -2374,6 +2401,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
         element("p", { className: "muted" }, "Choose a version to inspect its saved details."),
         newVersion,
         list,
+        older,
         olderError
           ? statusBlock("danger", null, `Older versions unavailable. ${message(olderError)}`)
           : null,
@@ -2398,6 +2426,31 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       ].filter(Boolean),
     );
     updateNavigationControls();
+    list.scrollTop = listScroll;
+    // A rebuild while the reader is in the rail (a poll that lands an outcome, or older versions
+    // loading) keeps focus on the same control. Once every older version is shown, focus goes to
+    // the first one that just loaded, below those listed before (a poll may add a newer one
+    // meanwhile; the viewed version shown on its own does not count), else the last version. A version no longer listed gives focus to the list's
+    // Tab stop.
+    if (focusKey !== undefined && !selector.contains(document.activeElement)) {
+      const usable = items.filter((item) => !item.disabled);
+      const lastShown = usable.findLastIndex((item) => listedBefore.has(railFocusKeys.get(item)));
+      const target =
+        [...railFocusKeys].find(([control, key]) => key === focusKey && !control.disabled)?.[0] ??
+        (focusKey === "older"
+          ? (usable.find(
+              (item, index) => index > lastShown && !listedBefore.has(railFocusKeys.get(item)),
+            ) ?? usable.at(-1))
+          : ["new", "chooser"].includes(focusKey)
+            ? undefined
+            : (usable.find((item) => item.tabIndex === 0) ?? usable[0]));
+      if (items.includes(target)) {
+        focusVersion(target);
+        target.scrollIntoView({ block: "nearest" });
+      } else {
+        target?.focus({ preventScroll: true });
+      }
+    }
   }
 
   // Without a version list yet (still loading), its first render shows the new state.
