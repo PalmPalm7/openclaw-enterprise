@@ -1840,7 +1840,29 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
         : "New version. Changes affect future deployments using this Configuration. Admitted versions stay unchanged."
       : selected === currentRevisionId
         ? "Current version · read-only admitted snapshot. Selection does not confirm that this version is serving."
-        : "Historical version · read-only admitted snapshot. Browsing it does not change the current version.";
+        : deployingRevision()?.id === selected
+          ? "Deploying version · read-only admitted snapshot. It becomes the current version only if its deployment completes."
+          : "Historical version · read-only admitted snapshot. Browsing it does not change the current version.";
+  }
+
+  // The newest version while its deployment is queued or running and it is not yet current. Right
+  // after Deploy new version it was called "Historical" beside "Selected version v1" (finding 2065).
+  function deployingRevision() {
+    const latest = visibleRevisions[0];
+    return latest &&
+      latest.id !== currentRevisionId &&
+      activityRevisionId === latest.id &&
+      PENDING_DEPLOYMENT_STATUSES.has(latestDeploymentStatus)
+      ? latest
+      : null;
+  }
+
+  function renderVersionNotice() {
+    const notice = content.querySelector(".version-selection-notice");
+    if (notice) {
+      // Deployment polls call this too; an unchanged notice is left untouched.
+      setText(notice, versionNotice());
+    }
   }
 
   function renderDetailHeading() {
@@ -2083,10 +2105,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       renderCurrentVersion();
     }
     renderDetailHeading();
-    const notice = content.querySelector(".version-selection-notice");
-    if (notice) {
-      notice.textContent = versionNotice();
-    }
+    renderVersionNotice();
   }
 
   function renderLatestDeployment() {
@@ -2525,6 +2544,11 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
                 }
               }
               renderLatestDeployment();
+              // A success is shown once the Agent reread makes the version current; until then
+              // the notice keeps "Deploying" rather than flash "Historical".
+              if (status !== "succeeded") {
+                renderVersionNotice();
+              }
               refreshDeployControls();
             },
           )
@@ -3285,6 +3309,8 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       mountedTab = retained;
       showDraftEditorNavigationBlock = retained.showBlock;
       content.replaceChildren(...retained.nodes);
+      // The deployment may have settled while this tab was parked.
+      renderVersionNotice();
       retained.resumeDrafts();
       return;
     }
