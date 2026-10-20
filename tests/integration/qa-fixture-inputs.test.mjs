@@ -865,6 +865,28 @@ test("development proof propagates POST rejection without helper retry or depend
   }
 });
 
+// Runs a node:test source in a child. A node:test parent passes NODE_TEST_CONTEXT, which
+// switches the child to the parent's binary stream; a direct or --test-isolation=none run does
+// not (finding 1132). Pin the child's reporters either way: TAP on stdout names the failure
+// type, spec on stderr prints the cause.
+function spawnTestSource(source) {
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  return spawn(
+    process.execPath,
+    [
+      "--test-reporter=tap",
+      "--test-reporter-destination=stdout",
+      "--test-reporter=spec",
+      "--test-reporter-destination=stderr",
+      "--input-type=module",
+      "-e",
+      source,
+    ],
+    { env, stdio: ["ignore", "pipe", "pipe"] },
+  );
+}
+
 test(
   "development proof errors omit secret-bearing fields from actual node:test output",
   { timeout: 10_000 },
@@ -887,9 +909,7 @@ test(
       throw error;
     }));
   `;
-    const child = spawn(process.execPath, ["--input-type=module", "-e", source], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const child = spawnTestSource(source);
     t.after(() => {
       if (child.exitCode === null) {
         child.kill("SIGKILL");
@@ -965,9 +985,7 @@ test(
       });
     }));
   `;
-    const child = spawn(process.execPath, ["--input-type=module", "-e", source], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const child = spawnTestSource(source);
     t.after(() => {
       if (child.exitCode === null) {
         child.kill("SIGKILL");
@@ -989,7 +1007,7 @@ test(
       assert.ok(!text.includes(JSON.stringify(value).slice(1, -1)));
     }
     const diagnostic = output.stdout + output.stderr;
-    assert.match(diagnostic, /hookFailed/);
+    assert.match(diagnostic, /failureType: 'hookFailed'/);
     assert.match(diagnostic, /recovery state preserved at \/owned\/synthetic\/state/);
     assert.match(diagnostic, /cleanup command failed/);
     assert.match(diagnostic, /EACCES/);
