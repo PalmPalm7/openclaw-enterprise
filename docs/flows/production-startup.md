@@ -13,7 +13,7 @@ PostgreSQL/authentication credentials, trusted Installation YAML and network
 policies. Wait for private API/worker readiness; authenticate `/installation`
 with the service key. Tenant deployment/model-backed TUI proof remains separate.
 
-Commands: [deployment guide](../guides/deploy.md).
+[Deployment guide](../guides/deploy.md).
 
 ## Entry Points
 
@@ -24,10 +24,12 @@ Commands: [deployment guide](../guides/deploy.md).
   `apps/controller/src/composition/production.ts:28`.
 - Assumptions: Explicit kubeconfig/context, enforcing NetworkPolicies, external
   PostgreSQL, approved immutable images, protected operator files, fresh
-  bootstrap PVC, exact API/client selectors, explicit `/32` egress hosts,
+  bootstrap PVC, exact API/client selectors, `/32` egress hosts,
   reviewed control-plane node labels, and an approved private OCC URL.
 
 ## Flow
+
+First install requires [empty OCE history](../reference/settings/operations.md#migration-history).
 
 ```mermaid
 graph TD

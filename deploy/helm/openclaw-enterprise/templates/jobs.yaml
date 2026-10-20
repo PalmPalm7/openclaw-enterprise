@@ -103,7 +103,11 @@ spec:
         {{- end }}
         - name: migration
           image: {{ .Values.images.controller | quote }}
-          args: [scripts/migrate-production.mjs]
+          args:
+            - scripts/migrate-production.mjs
+            {{- if .Release.IsInstall }}
+            - --expect-empty
+            {{- end }}
           securityContext:
             {{- include "openclaw.containerSecurity" . | nindent 12 }}
           resources:
