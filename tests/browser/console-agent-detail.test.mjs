@@ -345,6 +345,9 @@ test("Agent detail separates the current version, viewed version, and latest dep
   await activity.getByRole("button", { name: "Refresh deployment" }).click();
   await overview.nth(0).getByText("v3", { exact: true }).waitFor();
   await overview.nth(1).getByText("v3 · Failed").waitFor();
+  // The failure's card leads the page and folds Deployment details (finding 2094); open them.
+  await page.getByRole("region", { name: "Deployment needs attention" }).waitFor();
+  await activity.getByText("Deployment details", { exact: true }).click();
   await activity.getByText("Recorded status: Failed").waitFor();
   await activity
     .getByText("REVISION_FINALIZATION_INCOMPLETE: Deployment reconciliation failed.")

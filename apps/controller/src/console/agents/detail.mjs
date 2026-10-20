@@ -1799,6 +1799,8 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     recoveryActions,
   );
   let recoveryTarget;
+  // The failed version whose Deployment details the card has folded; see renderLatestDeployment.
+  let recoveryFolded = null;
   const overviewStatus = element(
     "div",
     { className: "agent-overview-status" },
@@ -2024,6 +2026,8 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   let latestDeploymentErrorCode = null;
   let latestDeploymentErrorMessage = null;
   let latestDeploymentRecord = null;
+  // Whether the newest version's panel last failed to refresh the Agent or its versions.
+  let latestOverviewUnavailable = false;
   // The newest version's status from its last record read; a failed read keeps it, so one
   // failure does not relabel a deploying version Historical (finding 2085).
   let latestRecordedStatus = null;
@@ -2548,17 +2552,26 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       currentHidden ||
       currentUnknown ||
       !callerPermissionsSettled;
-    // A page shown before its failure lands (a deploy the reader is watching, say) cannot wait
-    // for it as a load does (finding 1489): above the overview, the card pushed what the reader
-    // was watching down (finding 1655). It lands below the deployment activity it explains
-    // instead, and moves only the cards under it.
-    if (
-      recovery.hidden &&
-      !hideRecovery &&
-      !view.classList.contains("agent-detail-pending") &&
-      overviewStatus.nextElementSibling !== recovery
-    ) {
-      overviewStatus.after(recovery);
+    // A failure that lands while the page shows (a deploy the reader is watching) leads the
+    // page as it does on a load: below the open Deployment details it sat below the fold and
+    // repeated their error (finding 2094, which reverses 1655's placement). The card now carries
+    // that error and its next step, so the details fold once for each failed version it shows;
+    // the reader can open them again. The card says nothing of a cleanup, startup warnings or a
+    // refresh that could not reread the Agent, so a panel showing any of them stays open, and
+    // evidence the panel records later opens it as it does without a card.
+    if (recovery.hidden && !hideRecovery && recoveryFolded !== latest.id) {
+      recoveryFolded = latest.id;
+      const record =
+        latestDeploymentRecord?.revisionId === latest.id ? latestDeploymentRecord.status : null;
+      const details = activityPanel.querySelector?.(":scope > details");
+      if (
+        details?.open &&
+        !record?.cleanup &&
+        !record?.warnings?.length &&
+        !latestOverviewUnavailable
+      ) {
+        details.open = false;
+      }
     }
     setHidden(recovery, hideRecovery);
     if (!recovery.hidden) {
@@ -2788,6 +2801,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       latestRecordedStatus = null;
       agentRereadFailed = false;
       latestDeploymentRecord = null;
+      latestOverviewUnavailable = false;
       latestDeploymentError = false;
       latestDeploymentErrorCode = null;
       latestDeploymentErrorMessage = null;
@@ -2831,6 +2845,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
               if (overviewUnavailable) {
                 agentRereadFailed = true;
               }
+              latestOverviewUnavailable = Boolean(overviewUnavailable);
               latestDeploymentError = unavailable;
               latestDeploymentErrorCode = errorCode;
               latestDeploymentErrorMessage = record?.error?.message || null;
