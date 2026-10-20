@@ -134,3 +134,51 @@ test("the console breakpoints are the documented 520, 760 and 1100 px (design-la
     [],
   );
 });
+
+test("type uses the design-language scale (UX plan B3, spec P12)", () => {
+  // 16px on phone inputs is the size below which mobile browsers zoom on focus, not a type step.
+  const phoneInputMinimum = "16px";
+  const allowed = new Map([
+    ["input, select, textarea font-size", phoneInputMinimum],
+    [".log-picker select, .log-search input font-size", phoneInputMinimum],
+    [".channel-field input, .channel-field select font-size", phoneInputMinimum],
+    // The nav glyphs are fixed at 16px to match their 16px box (spec 6.1), not a type step.
+    [".nav-icon font-size", "16px"],
+    // UNKNOWN fits the 78px level column the log grid reserves (6.5em); on the scale it is 83px.
+    [".log-level font-size", "10px"],
+    [".log-level letter-spacing", "0.03em"],
+    // Fits the timestamp to its cell: 4px is the cell's slack, not a size.
+    [".log-time-text font-size", "min(var(--text-xs), (100cqi - 4px) / var(--log-time-ems, 19.4))"],
+  ]);
+  const offScale = [];
+  const used = new Set();
+  for (const { selector, prop, value } of rules(consoleCss + channelsCss)) {
+    const key = `${selector} ${prop}`;
+    const checks = {
+      "font-size": () => literalsOf(value).length > 0 || /%|calc\(|smaller|larger/.test(value),
+      font: () => literalsOf(value).length > 0 || /%|calc\(/.test(value),
+      "font-weight": () => /\d|\b(bold|bolder|lighter)\b/.test(value),
+      "font-family": () => !/^(var\(--font-(sans|mono)\)|inherit)$/.test(value),
+      "letter-spacing": () => !/^(var\(--tracking-(tight|caps)\)|normal)$/.test(value),
+    };
+    const bad = checks[prop]?.() ?? false;
+    if (!bad) {
+      continue;
+    }
+    if (allowed.get(key) === value) {
+      used.add(key);
+      continue;
+    }
+    offScale.push(`${selector} { ${prop}: ${value} }`);
+  }
+  assert.deepEqual(
+    offScale,
+    [],
+    "use --text-*, --weight-*, --font-* and --tracking-* (design-language 2.2)",
+  );
+  assert.deepEqual(
+    [...allowed.keys()].filter((key) => !used.has(key)),
+    [],
+    "drop allowances that no longer match a literal",
+  );
+});
