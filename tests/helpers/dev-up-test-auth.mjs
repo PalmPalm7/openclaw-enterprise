@@ -66,8 +66,21 @@ export async function provisionDevUpSandboxAgent({
   namespaceId,
   preset,
   modelKey,
+  model = "gpt-6-astra",
+  thinkingDefault,
   requestId,
 }) {
+  assert.ok(
+    typeof model === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(model),
+    "Development model ID must be a plain ID without a provider prefix",
+  );
+  assert.ok(
+    thinkingDefault === undefined ||
+      ["off", "minimal", "low", "medium", "high", "xhigh", "adaptive", "max", "ultra"].includes(
+        thinkingDefault,
+      ),
+    "Development model thinking default must be a supported OpenClaw thinking level",
+  );
   const secret = await post(
     `/namespaces/${namespaceId}/secrets`,
     { name: "Local sandbox proof", value: modelKey },
@@ -78,8 +91,11 @@ export async function provisionDevUpSandboxAgent({
   template.agent.harnessAuth = { method: "api_key", source: secret.data.ref };
   const rendered = renderPresetTemplate(template, {
     name: "Local sandbox proof",
-    model: "gpt-6-astra",
+    model,
   });
+  if (thinkingDefault !== undefined) {
+    rendered.configuration.values.agents.defaults.thinkingDefault = thinkingDefault;
+  }
   rendered.configuration.values.gateway.controlUi.enabled = false;
   return post(
     `/namespaces/${namespaceId}/agents/provision`,

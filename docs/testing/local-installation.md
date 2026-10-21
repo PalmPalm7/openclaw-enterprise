@@ -19,19 +19,27 @@ sandboxing, and Keycloak with fixture model responses. Failed cleanup retains
 state for `occ dev down`. See [hosted execution](README.md#run-the-hosted-local-installation-lane).
 
 For the rootful Podman installation case, supply an absolute, private (0600)
-single-token key file for the configured native Codex provider and `gpt-6-astra`:
+single-token key file for the configured native Codex provider. The model defaults
+to `gpt-6-astra`. Select another authorized model with `OCC_TEST_OPENAI_MODEL`
+(a plain model ID without a provider prefix). Optionally set
+`OCC_TEST_DEV_UP_THINKING_DEFAULT` to configure the Agent's OpenClaw thinking level:
 
 ```sh
 OCC_TEST_DEV_UP_MODEL_KEY_FILE=/absolute/private/model-key \
+OCC_TEST_OPENAI_MODEL=gpt-6-luna OCC_TEST_DEV_UP_THINKING_DEFAULT=max \
 OCC_TEST_DEV_UP_K3D_REAL=1 OCC_TEST_DEV_UP_CONTAINER_ENGINE=podman \
   node --test --test-concurrency=1 --test-name-pattern='dev-up (refuses|installs)' \
   tests/integration/dev-up-k3d-real.test.mjs
 ```
 
 The successful Podman case contacts that provider during startup. A key file does
-not select a custom gateway or model. Refusal cases read no model key. The key
-file stays unchanged; provisioning sends its value only through the Secret API.
-If cleanup fails, the retained cluster can contain that Secret until `occ dev down`.
+not select a custom gateway. The startup authentication probe selects the model
+but does not apply the Agent's thinking setting. A configured `max` therefore does
+not prove a model turn at that effort; a normal Gateway turn must verify the
+effective effort against the native model catalog. Refusal cases read no model
+key. The key file stays unchanged; provisioning sends its value only through the
+Secret API. If cleanup fails, the retained cluster can contain that Secret until
+`occ dev down`.
 
 Select the engine socket where the cluster's loopback ports are reachable. Leave
 image selectors unset to exercise tagged-image imports; immutable selections

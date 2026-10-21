@@ -31,7 +31,7 @@ const selected = process.env.OCC_TEST_DEV_UP_K3D_REAL === "1";
 const withSelectedDevUpModelKey =
   process.env.OCC_TEST_DEV_UP_CONTAINER_ENGINE === "podman"
     ? (body) => withDevUpModelKey(process.env.OCC_TEST_DEV_UP_MODEL_KEY_FILE, body)
-    : (body) => body;
+    : (body) => (t) => body(t, undefined);
 
 // Both the lane and direct opt-in execution need this image on a cold engine.
 // Keep the 15-minute pull retry bound, three 30-second inspections and process
@@ -524,6 +524,8 @@ test(
             namespaceId: namespace.id,
             preset,
             modelKey,
+            model: process.env.OCC_TEST_OPENAI_MODEL,
+            thinkingDefault: process.env.OCC_TEST_DEV_UP_THINKING_DEFAULT,
             requestId: `req_${randomUUID()}`,
           });
         }

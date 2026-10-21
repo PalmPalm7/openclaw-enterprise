@@ -1382,6 +1382,70 @@ test("development proof sends the key only to Secret creation and renders the ge
   assert.ok(!JSON.stringify(provision).includes(modelKey));
   assert.deepEqual(preset, original);
   assert.deepEqual(result, { data: { workId: "work-1" } });
+
+  // A selected model must replace every template reference without passing the key
+  // to the renderer or changing the Namespace's shared Preset.
+  calls.length = 0;
+  await provisionDevUpSandboxAgent({
+    namespaceId: "namespace-1",
+    preset,
+    modelKey,
+    model: "gpt-6-luna",
+    thinkingDefault: "max",
+    requestId: "request-2",
+    async post(path, body, expected) {
+      calls.push({ path, body, expected });
+      return calls.length === 1 ? { data: { ref } } : { data: { workId: "work-2" } };
+    },
+  });
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0], {
+    path: "/namespaces/namespace-1/secrets",
+    body: { name: "Local sandbox proof", value: modelKey },
+    expected: 201,
+  });
+  const selected = calls[1];
+  assert.deepEqual(selected.body.harnessAuth, { method: "api_key", source: ref });
+  assert.equal(selected.body.configuration.values.agents.defaults.model, "codex/gpt-6-luna");
+  assert.deepEqual(selected.body.configuration.values.agents.defaults.models, {
+    "codex/gpt-6-luna": { agentRuntime: { id: "codex" } },
+  });
+  assert.deepEqual(selected.body.configuration.values.models.providers.codex.models, [
+    { id: "gpt-6-luna", name: "gpt-6-luna" },
+  ]);
+  assert.equal(selected.body.configuration.values.agents.defaults.thinkingDefault, "max");
+  assert.ok(!JSON.stringify(selected).includes(modelKey));
+  assert.deepEqual(preset, original);
+});
+
+test("development proof rejects invalid model settings before creating a Secret", async () => {
+  const { provisionDevUpSandboxAgent } = await import("../helpers/dev-up-test-auth.mjs");
+  const preset = JSON.parse(
+    await readFile(new URL("../../deploy/presets/standard-codex.json", import.meta.url), "utf8"),
+  );
+  for (const selection of [
+    { model: "" },
+    { model: "codex/gpt-6-luna" },
+    { model: "gpt-6-luna\n" },
+    { model: "gpt-6-luna", thinkingDefault: "maximum" },
+  ]) {
+    let calls = 0;
+    await assert.rejects(
+      provisionDevUpSandboxAgent({
+        namespaceId: "namespace-1",
+        preset,
+        modelKey: "synthetic-invalid-selection-token",
+        requestId: "request-1",
+        ...selection,
+        async post() {
+          calls += 1;
+          throw new Error("Invalid model settings reached Secret creation");
+        },
+      }),
+      /Development model (ID|thinking default) must/,
+    );
+    assert.equal(calls, 0);
+  }
 });
 
 test("development proof propagates POST rejection without helper retry or dependent submission", async () => {
