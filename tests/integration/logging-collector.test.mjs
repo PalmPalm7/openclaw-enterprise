@@ -9,6 +9,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { createRequire } from "node:module";
 
+import { completeJsonLines } from "../helpers/ci-logging.mjs";
+
 const { loadYaml } = createRequire(new URL("../../apps/controller/package.json", import.meta.url))(
   "@kubernetes/client-node",
 );
@@ -173,18 +175,13 @@ async function exportedRecords(out, mapRecord) {
     }
     throw error;
   }
-  return text
-    .trim()
-    .split("\n")
-    .filter(Boolean)
-    .flatMap((line) => {
-      const payload = JSON.parse(line);
-      return payload.resourceLogs.flatMap((resource) =>
-        resource.scopeLogs.flatMap((scope) =>
-          scope.logRecords.map((record) => mapRecord(resource, record)),
-        ),
-      );
-    });
+  return completeJsonLines(text).flatMap((payload) =>
+    payload.resourceLogs.flatMap((resource) =>
+      resource.scopeLogs.flatMap((scope) =>
+        scope.logRecords.map((record) => mapRecord(resource, record)),
+      ),
+    ),
+  );
 }
 
 // A test that checks what the Collector drops ends its OTLP request with this
@@ -1367,6 +1364,17 @@ test(
                 revisionId,
               }),
               line({ severity: "WARN", event: "native_admin.websocket_denial_audit_failed" }),
+              // A Compute-owner mismatch keeps the Agent's IDs; the Driver names stay local.
+              line({
+                severity: "WARN",
+                event: "native_admin.compute_owner_mismatch",
+                namespaceId,
+                agentId,
+                revisionId,
+                revisionCompute: { id: `compute-${canary}`, implementation: canary },
+                selectedCompute: { id: `selected-${canary}`, implementation: canary },
+                message: `Native admin UI is refused ${canary}`,
+              }),
               // Account IDs and messages that name them stay in local logs.
               line({
                 severity: "WARN",
@@ -1383,6 +1391,11 @@ test(
                 skippedUserIds: [`user_${canary}`],
                 skippedUserCount: 1,
                 skippedUserIdsTruncated: false,
+              }),
+              line({
+                severity: "WARN",
+                event: "authentication.forwarded-refused-warning",
+                code: "TRUSTED_PROXY_NOT_CONFIGURED",
               }),
               line({
                 severity: "WARN",
@@ -1483,10 +1496,20 @@ test(
           "occ.revision.id": revisionId,
         }),
         api("WARN", { "event.name": "native_admin.websocket_denial_audit_failed" }),
+        api("WARN", {
+          "event.name": "native_admin.compute_owner_mismatch",
+          "occ.namespace.id": namespaceId,
+          "occ.agent.id": agentId,
+          "occ.revision.id": revisionId,
+        }),
         api("WARN", { "event.name": "authentication.activation-warning" }),
         api("WARN", {
           "event.name": "authentication.password-sign-in-warning",
           "occ.code": "EXTERNAL_IDENTITY_MISSING",
+        }),
+        api("WARN", {
+          "event.name": "authentication.forwarded-refused-warning",
+          "occ.code": "TRUSTED_PROXY_NOT_CONFIGURED",
         }),
         api("WARN", { "event.name": "authentication.recovery-seed-warning" }),
         summary("occ-worker", "WARN", "stderr", {

@@ -27,21 +27,26 @@ func validateClusterName(name string) error {
 }
 
 type developmentState struct {
-	Version           int    `json:"version"`
-	Repository        string `json:"repository"`
-	ComputeDriver     string `json:"computeDriver"`
-	SandboxDriver     string `json:"sandboxDriver"`
-	DeploymentMode    string `json:"deploymentMode,omitempty"`
-	PlatformNamespace string `json:"platformNamespace,omitempty"`
-	APIPort           int    `json:"apiPort,omitzero"`
-	BrowserPort       int    `json:"browserPort,omitzero"`
-	ContainerEngine   string `json:"containerEngine"`
-	ComposeProject    string `json:"composeProject"`
-	Cluster           string `json:"cluster"`
-	DockerHost        string `json:"dockerHost"`
-	KeyPath           string `json:"keyPath"`
-	KeyOwned          bool   `json:"keyOwned"`
-	directory         string
+	Version                     int    `json:"version"`
+	Repository                  string `json:"repository"`
+	ComputeDriver               string `json:"computeDriver"`
+	SandboxDriver               string `json:"sandboxDriver"`
+	DeploymentMode              string `json:"deploymentMode,omitempty"`
+	PlatformNamespace           string `json:"platformNamespace,omitempty"`
+	APIPort                     int    `json:"apiPort,omitzero"`
+	BrowserPort                 int    `json:"browserPort,omitzero"`
+	BrowserOrigin               string `json:"browserOrigin,omitempty"`
+	NativeAdminDomain           string `json:"nativeAdminDomain,omitempty"`
+	ContainerEngine             string `json:"containerEngine"`
+	ComposeProject              string `json:"composeProject"`
+	Cluster                     string `json:"cluster"`
+	DockerHost                  string `json:"dockerHost"`
+	KeyPath                     string `json:"keyPath"`
+	KeyOwned                    bool   `json:"keyOwned"`
+	SignIn                      string `json:"signIn,omitempty"`
+	SandboxNetworkPolicies      []any  `json:"sandboxNetworkPolicies,omitempty"`
+	SandboxNetworkPolicyCeiling []any  `json:"sandboxNetworkPolicyCeiling,omitempty"`
+	directory                   string
 }
 
 func (s *developmentState) composeCommand() []string {
@@ -155,6 +160,16 @@ func readState(directory string) (*developmentState, error) {
 		}
 	case "k3d":
 		if state.ComposeProject != "" || !namespaceName.MatchString(state.PlatformNamespace) || state.APIPort < 1 || state.APIPort > 65535 || state.BrowserPort < 0 || state.BrowserPort > 65535 {
+			return nil, fmt.Errorf("unsupported development state")
+		}
+	default:
+		return nil, fmt.Errorf("unsupported development state")
+	}
+	switch state.SignIn {
+	case "":
+	case developmentSignInKeycloak:
+		// Only the routing-enabled Kubernetes-only profile publishes Keycloak.
+		if state.DeploymentMode != "k3d" || state.SandboxDriver != "none" || state.BrowserPort == 0 {
 			return nil, fmt.Errorf("unsupported development state")
 		}
 	default:

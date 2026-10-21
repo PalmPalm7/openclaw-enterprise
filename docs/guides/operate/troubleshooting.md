@@ -222,7 +222,7 @@ CONSOLE_URL='<printed-HTTPS-browser-console-URL>'
 [local browser CA trust](#the-local-console-reports-a-certificate-error) on the
 browser computer using the local `BROWSER_CA` value above instead of the startup
 machine's CA path. Keep the printed hostname and port in `CONSOLE_URL`. Leave the
-CA private key and the state directory on the startup machine. Open the printed
+state directory, which holds the TLS key, on the startup machine. Open the printed
 URL. The console sign-in page loads. Stop the forward when you are done. Do
 not publish the console port on an address other than loopback. This name and
 certificate are for the private development installation.
@@ -257,12 +257,16 @@ If the Job started, inspect the failing container:
 
 ```bash
 kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT" -n openclaw-system \
+  logs "$INITIALIZATION_JOB" -c installation-check # upgrades only
+kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT" -n openclaw-system \
   logs "$INITIALIZATION_JOB" -c migration
 kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT" -n openclaw-system \
   logs "$INITIALIZATION_JOB" -c bootstrap
 ```
 
-Migration runs before bootstrap; an unstarted bootstrap container has no logs.
+On an upgrade, `installation-check` first loads the Installation as API
+startup does and names a refused setting and file; the running API keeps
+serving. Migration runs before bootstrap; an unstarted container has no logs.
 For image, scheduling, or volume errors, use the Pod events reported by
 `kubectl describe pod <pod-name>` with the same context and namespace. Fix the
 specific image, scheduling, or storage error. For a bootstrap failure, follow

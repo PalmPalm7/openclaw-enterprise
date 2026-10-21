@@ -8,7 +8,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import { immutableImageAccepted, imageReferenceCases } from "../fixtures/image-reference-cases.mjs";
 import { rangeWideningLocale } from "../helpers/utf8-locale.mjs";
+import { compileCacheEnvironment } from "../helpers/compile-cache.mjs";
 
 const execute = promisify(execFile);
 const repository = fileURLToPath(new URL("../../", import.meta.url));
@@ -81,7 +83,7 @@ test("prepare-bootstrap-volume requires explicit cluster selectors and immutable
   const { directory, kubeconfig } = await fixture(t);
   const base = {
     cwd: repository,
-    env: { PATH: `${directory}:${process.env.PATH}` },
+    env: { ...compileCacheEnvironment, PATH: `${directory}:${process.env.PATH}` },
   };
 
   await assert.rejects(
@@ -132,6 +134,34 @@ test("prepare-bootstrap-volume requires explicit cluster selectors and immutable
     ),
     /--image must be an approved immutable SHA-256 image reference/,
   );
+  // Kubernetes also rejects an uppercase repository path; only the registry host and the tag
+  // may use uppercase, as in the chart and profile preflight.
+  for (const name of [
+    "registry.example.invalid/openclaw/Controller",
+    "registry.example.invalid:5000/Openclaw/controller:release_1",
+    "Controller",
+  ]) {
+    await assert.rejects(
+      execute(
+        helper,
+        [
+          "--kubeconfig",
+          kubeconfig,
+          "--context",
+          "ctx",
+          "--namespace",
+          "openclaw-system",
+          "--claim",
+          "claim",
+          "--image",
+          `${name}@sha256:${"a".repeat(64)}`,
+        ],
+        base,
+      ),
+      /--image repository path must be lowercase/,
+      name,
+    );
+  }
   // A digest is exactly 64 hex characters.
   for (const digest of ["a".repeat(63), "a".repeat(65)]) {
     await assert.rejects(
@@ -249,7 +279,7 @@ test("prepare-bootstrap-volume creates a hardened preparation Pod and removes it
     ],
     {
       cwd: repository,
-      env: { PATH: `${directory}:${process.env.PATH}` },
+      env: { ...compileCacheEnvironment, PATH: `${directory}:${process.env.PATH}` },
     },
   );
   assert.ok(
@@ -324,7 +354,7 @@ test("prepare-bootstrap-volume omits nodeSelector unless requested", async (t) =
     ],
     {
       cwd: repository,
-      env: { PATH: `${directory}:${process.env.PATH}` },
+      env: { ...compileCacheEnvironment, PATH: `${directory}:${process.env.PATH}` },
     },
   );
 
@@ -355,7 +385,7 @@ test("prepare-bootstrap-volume retains the preparation Pod when Kubernetes repor
       ],
       {
         cwd: repository,
-        env: { PATH: `${directory}:${process.env.PATH}` },
+        env: { ...compileCacheEnvironment, PATH: `${directory}:${process.env.PATH}` },
       },
     ),
     ({ stderr }) =>
@@ -395,7 +425,7 @@ test("prepare-bootstrap-volume refuses unverifiable success reports without prin
       ],
       {
         cwd: repository,
-        env: { PATH: `${directory}:${process.env.PATH}` },
+        env: { ...compileCacheEnvironment, PATH: `${directory}:${process.env.PATH}` },
       },
     ),
     ({ stderr }) =>
@@ -425,7 +455,10 @@ test("prepare-bootstrap-volume preserves YAML-scalar namespace names as strings"
           "--image",
           image,
         ],
-        { cwd: repository, env: { PATH: `${directory}:${process.env.PATH}` } },
+        {
+          cwd: repository,
+          env: { ...compileCacheEnvironment, PATH: `${directory}:${process.env.PATH}` },
+        },
       );
       const manifest = loadYaml(await readFile(manifestPath, "utf8"));
       assert.equal(manifest.metadata.namespace, namespace);
@@ -455,7 +488,10 @@ test("prepare-bootstrap-volume preserves YAML-scalar node selector keys and valu
       "--node-selector",
       "node-role.kubernetes.io/infra=",
     ],
-    { cwd: repository, env: { PATH: `${directory}:${process.env.PATH}` } },
+    {
+      cwd: repository,
+      env: { ...compileCacheEnvironment, PATH: `${directory}:${process.env.PATH}` },
+    },
   );
   const manifest = loadYaml(await readFile(manifestPath, "utf8"));
   assert.deepEqual(manifest.spec.nodeSelector, {
@@ -473,7 +509,12 @@ test("prepare-bootstrap-volume refuses non-ASCII names under a UTF-8 locale", as
   }
   const base = {
     cwd: repository,
-    env: { PATH: `${directory}:${process.env.PATH}`, LANG: locale, LC_ALL: locale },
+    env: {
+      ...compileCacheEnvironment,
+      PATH: `${directory}:${process.env.PATH}`,
+      LANG: locale,
+      LC_ALL: locale,
+    },
   };
   const argumentsFor = (overrides) => {
     const values = {
@@ -520,4 +561,57 @@ test("prepare-bootstrap-volume refuses non-ASCII names under a UTF-8 locale", as
   }
   // Every refusal happens before kubectl runs.
   await assert.rejects(readFile(statePath, "utf8"), { code: "ENOENT" });
+});
+
+// The helper takes exactly the references Kubernetes can pull with a lowercase SHA-256 digest,
+// as profile preflight and the chart do for images.controller, and writes an accepted one,
+// such as an IPv6 registry host, into the preparation Pod as written.
+test("prepare-bootstrap-volume gives image references Kubernetes' verdict", async (t) => {
+  for (const [label, reference, problem] of imageReferenceCases) {
+    const { directory, kubeconfig, statePath, manifestPath } = await fixture(t);
+    const run = execute(
+      helper,
+      [
+        "--kubeconfig",
+        kubeconfig,
+        "--context",
+        "ctx",
+        "--namespace",
+        "openclaw-system",
+        "--claim",
+        "claim",
+        "--image",
+        reference,
+      ],
+      {
+        cwd: repository,
+        env: { ...compileCacheEnvironment, PATH: `${directory}:${process.env.PATH}` },
+      },
+    );
+    if (immutableImageAccepted(reference, problem)) {
+      await run;
+      assert.equal(
+        loadYaml(await readFile(manifestPath, "utf8")).spec.containers[0].image,
+        reference,
+        label,
+      );
+      continue;
+    }
+    await assert.rejects(
+      run,
+      (error) => {
+        assert.match(
+          error.stderr,
+          problem === "uppercase-repository" && /@sha256:[a-f0-9]{64}$/.test(reference)
+            ? /--image repository path must be lowercase/
+            : /--image must be an approved immutable SHA-256 image reference/,
+          label,
+        );
+        return true;
+      },
+      label,
+    );
+    // A refused reference never reaches kubectl.
+    await assert.rejects(readFile(statePath, "utf8"), { code: "ENOENT" }, label);
+  }
 });

@@ -301,6 +301,23 @@ test("development admission fails closed outside explicit loopback-only developm
       cidr,
     );
   }
+  for (const browserOrigin of [
+    "https://public.example.com",
+    "ftp://127.0.0.1:3000",
+    "http://x.localhost",
+    "https://.localhost",
+    "http://localhost:3000/auth",
+  ]) {
+    await assert.rejects(
+      createFixture({ development: { browserOrigin } }),
+      /HTTPS localhost subdomain/,
+    );
+  }
+  // Outside development even a valid loopback origin is refused, not admitted.
+  await assert.rejects(
+    createFixture({ development: { enabled: false, browserOrigin: "http://127.0.0.1:3000" } }),
+    /HTTPS localhost subdomain/,
+  );
 
   const fixture = await createFixture();
   const remote = await request(fixture.app, "/installation/bootstrap", {
@@ -360,6 +377,65 @@ test("a trusted development CIDR admits its own range and nothing else", async (
     const response = await list(refused);
     assert.equal(response.statusCode, 403, refused);
     assert.match(response.json().error.message, /restricted to direct loopback requests/, refused);
+  }
+});
+
+test("an exact development browser origin admits only its trusted proxy", async (t) => {
+  const browserOrigin = "https://console.occ-dev-example.oce.localhost:8443";
+  const development = {
+    browserOrigin,
+    trustedCidrs: ["10.89.0.0/16"],
+  };
+  const fixture = await createFixture({ development });
+  await bootstrap(fixture);
+  const app = fixture.createApp(fixture.administrator, { development }, createFastifyApp);
+  t.after(() => app.close());
+  const list = ({ host, origin, remoteAddress }) => {
+    const authentication = authenticatedHeaders(fixture.app.defaultSession);
+    delete authentication.origin;
+    return app.inject({
+      url: "/namespaces",
+      remoteAddress,
+      headers: {
+        ...authentication,
+        host,
+        ...(origin === undefined ? {} : { origin }),
+      },
+    });
+  };
+
+  for (const headers of [
+    { host: new URL(browserOrigin).host, remoteAddress: "10.89.3.4" },
+    {
+      host: new URL(browserOrigin).host,
+      origin: browserOrigin,
+      remoteAddress: "10.89.3.4",
+    },
+  ]) {
+    const response = await list(headers);
+    assert.equal(response.statusCode, 200, response.body);
+  }
+
+  for (const headers of [
+    {
+      host: "other.occ-dev-example.oce.localhost:8443",
+      origin: browserOrigin,
+      remoteAddress: "10.89.3.4",
+    },
+    {
+      host: new URL(browserOrigin).host,
+      origin: "https://other.occ-dev-example.oce.localhost:8443",
+      remoteAddress: "10.89.3.4",
+    },
+    {
+      host: new URL(browserOrigin).host,
+      origin: browserOrigin,
+      remoteAddress: "10.90.3.4",
+    },
+  ]) {
+    const response = await list(headers);
+    assert.equal(response.statusCode, 403);
+    assert.match(response.json().error.message, /restricted to direct loopback requests/);
   }
 });
 
@@ -464,7 +540,11 @@ test("bootstrap owns one Installation without a plural installation collection",
 
   const read = await request(fixture.app, "/installation");
   assert.equal(read.response.status, 200);
-  assert.deepEqual(read.payload.data, installation);
+  // No Sandbox Driver is selected: Embedded OpenClaw is the one mode admission accepts (#2670).
+  assert.deepEqual(read.payload.data, {
+    ...installation,
+    capabilities: { openclaw: { executionModes: ["embedded"] } },
+  });
 
   const again = await request(fixture.app, "/installation/bootstrap", {
     body: { name: "Second installation" },
@@ -625,7 +705,11 @@ test("concurrent streaming bootstrap creates one audited Installation", async ()
 
   const confirmed = await request(fixture.app, "/installation");
   assert.equal(confirmed.response.status, 200);
-  assert.deepEqual(confirmed.payload.data, installation);
+  // No Sandbox Driver is selected: Embedded OpenClaw is the one mode admission accepts (#2670).
+  assert.deepEqual(confirmed.payload.data, {
+    ...installation,
+    capabilities: { openclaw: { executionModes: ["embedded"] } },
+  });
 
   const bootstrapEvents = fixture.auditSink.events.filter(
     (event) => event.kind === "bootstrap" && event.resource.kind === "installation",
@@ -662,7 +746,11 @@ test("an existing controller cannot be configured for a different Installation",
 
   const unchanged = await request(fixture.app, "/installation");
   assert.equal(unchanged.response.status, 200);
-  assert.deepEqual(unchanged.payload.data, installation);
+  // No Sandbox Driver is selected: Embedded OpenClaw is the one mode admission accepts (#2670).
+  assert.deepEqual(unchanged.payload.data, {
+    ...installation,
+    capabilities: { openclaw: { executionModes: ["embedded"] } },
+  });
   assert.deepEqual(fixture.controller.installation, installation);
 });
 
@@ -711,6 +799,24 @@ test("malformed, non-JSON, invalid, and oversized inputs fail without mutations"
     assert.equal(fixture.controller.pendingOperations().length, before);
   }
 
+  // So must the Configuration write defaults.
+  for (const method of ["POST", "PATCH"]) {
+    const suffix = method === "PATCH" ? "/cfg_00000000-0000-4000-8000-000000000001" : "";
+    const result = await request(
+      fixture.app,
+      `/namespaces/${tenantANamespaceId}/configurations${suffix}`,
+      {
+        method,
+        body: {
+          ...(method === "POST" ? { kind: "agent" } : {}),
+          values: { notes: "Routine notes. ".repeat(40) },
+        },
+      },
+    );
+    assert.equal(result.response.status, 413, method);
+    assert.equal(fixture.controller.pendingOperations().length, before);
+  }
+
   assert.equal(
     fixture.auditSink.events.filter(
       (event) => event.kind === "mutation" && event.resource.kind === "namespace",
@@ -728,9 +834,8 @@ test("NUL characters and unpaired surrogates are refused in bodies and path para
   const configurations = `/namespaces/${namespace.id}/configurations`;
   const nul = ["a NUL character", "INVALID_FORMAT"];
   const surrogate = ["an unpaired UTF-16 surrogate", "INVALID_VALUE"];
-  // A deep body inside the 64 KiB limit; its detail path keeps whole leading segments.
-  const deep = 30_000;
-  const deepPath = `/values/x${"/0".repeat((512 - "/values/x".length) >> 1)}`;
+  // A detail path too long for 512 characters keeps whole leading segments.
+  const longKey = "k".repeat(300);
   const cases = [
     ["/namespaces", '{"name":"lone \\ud800 surrogate"}', "/name", surrogate],
     ["/namespaces", '{"name":"trailing \\udc00"}', "/name", surrogate],
@@ -750,8 +855,8 @@ test("NUL characters and unpaired surrogates are refused in bodies and path para
     [configurations, `{"${"k".repeat(600)}\\u0000":1}`, `/${"k".repeat(511)}`, nul],
     [
       configurations,
-      `{"kind":"agent","values":{"x":${"[".repeat(deep)}"\\u0000"${"]".repeat(deep)}}}`,
-      deepPath,
+      `{"kind":"agent","values":{"x":{"${longKey}":{"${"m".repeat(300)}":"\\u0000"}}}}`,
+      `/values/x/${longKey}`,
       nul,
     ],
   ];
@@ -767,6 +872,15 @@ test("NUL characters and unpaired surrogates are refused in bodies and path para
     const shown = path.length <= room ? path : `${path.slice(0, room - 1)}…`;
     assert.equal(result.payload.error.message, `${before}${shown}${after}`);
   }
+  // A body nested past the depth bound is refused before its text is checked.
+  const deep = 30_000;
+  const tooDeep = await request(fixture.app, configurations, {
+    body: `{"kind":"agent","values":{"x":${"[".repeat(deep)}"\\u0000"${"]".repeat(deep)}}}`,
+  });
+  assert.equal(tooDeep.response.status, 400);
+  assert.deepEqual(tooDeep.payload.error.details, [
+    { path: `/values/x${"/0".repeat(23)}`, code: "TOO_DEEP" },
+  ]);
   // A surrogate pair is one well-formed character.
   const paired = await request(fixture.app, "/namespaces", { body: { name: "Paired \u{1F600}" } });
   assert.equal(paired.response.status, 201);
@@ -1581,7 +1695,7 @@ test("runtime log cursors bind one principal and view and are re-authorized on e
   for (const [label, forged, session] of [
     ["foreign principal", first.data.cursor, other.session],
     ["tampered", tamperedCursor, viewer.session],
-    ["another source", first.data.cursor.replace("v1.", "v1.e"), viewer.session],
+    ["another source", first.data.cursor.replace("v2.", "v2.e"), viewer.session],
   ]) {
     const rejected = await fixture.request(
       "GET",
@@ -2097,6 +2211,38 @@ test("runtime log failures are fixed, content-free and never read after an audit
   const hostile = await fixture.request("GET", target.runtimePath);
   assert.equal(hostile.status, 503);
   assert.equal(hostile.body.error.code, "RUNTIME_LOGS_UNAVAILABLE");
+});
+
+test("runtime log reads retain allowance through backward and restored wall clocks", async (t) => {
+  let elapsed = 0;
+  t.mock.method(performance, "now", () => elapsed);
+  const initial = Date.now();
+  t.mock.timers.enable({ apis: ["Date"], now: initial });
+  const fixture = await createRuntimeLogFixture();
+  const target = await fixture.deployAgent();
+  const first = await fixture.request("GET", target.runtimePath);
+  assert.equal(first.status, 200, first.text);
+
+  // A host clock correction must not turn the nine unspent requests into token debt.
+  t.mock.timers.setTime(initial - 3_600_000);
+  for (let remaining = 9; remaining > 0; remaining -= 1) {
+    const response = await fixture.request("GET", target.runtimePath);
+    assert.equal(response.status, 200, response.text);
+  }
+  const exhausted = await fixture.request("GET", target.runtimePath);
+  assert.equal(exhausted.status, 429);
+  assert.equal(exhausted.headers.get("retry-after"), "1");
+
+  // Restoring the wall clock must not mint a second burst: no time has elapsed.
+  t.mock.timers.setTime(initial);
+  assert.equal((await fixture.request("GET", target.runtimePath)).status, 429);
+
+  // Only elapsed time refills the bucket, independently of wall-clock corrections.
+  elapsed += 500;
+  t.mock.timers.setTime(initial + 500);
+  const refilled = await fixture.request("GET", target.runtimePath);
+  assert.equal(refilled.status, 200, refilled.text);
+  assert.equal((await fixture.request("GET", target.runtimePath)).status, 429);
 });
 
 test("runtime log reads are rate limited per principal and Agent with Retry-After", async () => {

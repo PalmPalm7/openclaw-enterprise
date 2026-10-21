@@ -104,6 +104,13 @@ auth:
     secretName: occ-oidc-login
     clientIdKey: client-id
     clientSecretKey: client-secret
+    # Optional CA certificate bundle for the IdP (no private keys). Both or neither.
+    # API-only process-wide Node trust, combined with Gateway roots. Replace API Pods on rotation.
+    # Requires a separate database.caSecretName and an application URL with a DNS host
+    # (not an IP), sslmode=verify-full and sslrootcert=database.caMountPath/database.caKey.
+    # May share a public CA bundle Secret with gatewayRouting.caSecretName.
+    caSecretName: ""
+    caSecretKey: ""
     # client_secret_post (default) or client_secret_basic.
     tokenAuth: client_secret_post
     # Console button label ("Continue with <displayName>"); empty means "single sign-on".
@@ -171,6 +178,15 @@ repositoryCredentials:
   publicCaKey: ca.crt
   upstreamCidrs: []
 
+# Anonymous reads of known public GitHub repositories, for ordinary dedicated
+# Codex Agents whose authored proxy allows the exact Service IP. No GitHub App or token required.
+publicGithubRead:
+  enabled: false
+  # Reserve this Service IP until all revisions granting access to it retire.
+  clusterIP: ""
+  # Operator-approved IPv4 CIDRs for api.github.com; no default Internet grant.
+  upstreamCidrs: []
+
 gatewayRouting:
   enabled: false
   # Empty derives the private Envoy Service DNS name:
@@ -225,9 +241,11 @@ api:
   # Optional exact HTTP(S) proxy endpoint for API-side Slack directory lookup.
   # The proxy must allow CONNECT to slack.com:443; empty disables lookup in production.
   channelDirectoryProxyUrl: ""
-  # Optional model-list discovery: API Pod HTTPS egress to provider IPv4 /32 hosts.
-  # Codex device login (ChatGPT OAuth) also needs auth.openai.com here.
-  # Operators maintain these addresses; Console model selection does not require it.
+  # API-only HTTPS egress to explicit provider IPv4 /32 hosts for discovery and login.
+  # Hosted codex-plugin needs auth.openai.com and chatgpt.com. Its installation
+  # profile resolves these unless CIDRs are supplied; refresh on DNS changes.
+  # Manual installs maintain this list or provide an external egress policy.
+  # Console model selection does not require discovery.
   modelDiscoveryCidrs: []
   # Trust client-address headers from a proxy in front of the API. Off by default:
   # the API then rejects forwarded headers and keys sign-in limits on the socket peer.

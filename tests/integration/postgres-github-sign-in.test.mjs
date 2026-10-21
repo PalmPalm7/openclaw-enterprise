@@ -740,7 +740,10 @@ test(
       url: `/api/auth/providers/github/callback?state=${unavailableAttempt.state}&code=provider-unavailable`,
       headers: { cookie: unavailableAttempt.cookie },
     });
-    assert.equal(unavailable.headers.location, "/console/?authError=github");
+    assert.equal(
+      unavailable.headers.location,
+      "/console/?authError=github&authReason=provider-unavailable",
+    );
     assert.equal(unavailable.headers["set-cookie"], undefined);
     const offlinePassword = await app.inject({
       method: "POST",
@@ -824,8 +827,8 @@ test(
     );
     await page.goto(`${origin}/console/agents/${agent.id}?namespace=${namespaceId}&revision=draft`);
     assert.equal((await (await detailResponse).json()).data.id, agent.id);
-    await page.getByRole("heading", { name: "Create new version" }).waitFor();
-    await page.getByRole("button", { name: "Configuration", exact: true }).waitFor();
+    await page.getByRole("heading", { name: "Prepare this version" }).waitFor();
+    await page.getByRole("tab", { name: "Configuration", exact: true }).waitFor();
     assert.ok((await page.locator("body").textContent()).includes(agent.name));
     const after = await state.loadNativeIAMState(installation.id);
     assert.deepEqual(

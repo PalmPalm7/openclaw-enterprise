@@ -5,7 +5,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import pg from "pg";
@@ -15,6 +15,8 @@ import {
   initialSchemaState,
   migrationCatalog,
 } from "../../scripts/migration-catalog.mjs";
+import { migrateWithHistory } from "../../scripts/migration-history.mjs";
+import { createPostgresPool } from "../../packages/occ/src/state/postgres-pool.ts";
 
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
 const migrationsDirectory = join(repositoryRoot, "migrations");
@@ -895,18 +897,66 @@ const requiresHistoryPostgres = {
 // node:test still waits for every subtest and fails the parent if one fails.
 const concurrentHistoryPostgres = { ...requiresHistoryPostgres, concurrency: 4 };
 
-async function migrationHistoryFixture() {
+// Administrator SQL runs over TCP as the container's own superuser: one pool for the
+// `postgres` database (CREATE/DROP DATABASE) and a fresh session per database-local call,
+// like each `psql -c` it replaces. `docker inspect` reads the credential once per file.
+async function historyAdministrator(container, hostname, port) {
+  const { stdout } = await execFileAsync(
+    "docker",
+    ["inspect", "--format", "{{json .Config.Env}}", container],
+    { encoding: "utf8" },
+  );
+  const environment = new Map(
+    JSON.parse(stdout).map((entry) => {
+      const separator = entry.indexOf("=");
+      return [entry.slice(0, separator), entry.slice(separator + 1)];
+    }),
+  );
+  const password = environment.get("POSTGRES_PASSWORD");
+  assert.ok(password, "The PostgreSQL container must define its administrator password.");
+  const url = new URL("postgresql://localhost/postgres");
+  url.hostname = hostname;
+  url.port = String(port);
+  // The fixtures name the `postgres` role (owners, grantors), as `psql -U postgres` did.
+  assert.equal(environment.get("POSTGRES_USER") ?? "postgres", "postgres");
+  url.username = "postgres";
+  url.password = password;
+  const pool = new pg.Pool({ connectionString: url.toString(), max: 4 });
+  // An idle client's error (server restart) must fail its next query, not the process.
+  pool.on("error", () => {});
+  assert.deepEqual(
+    (await pool.query("SELECT rolsuper FROM pg_roles WHERE rolname=current_user")).rows,
+    [{ rolsuper: true }],
+  );
+  return { adminUrl: url.toString(), admin: pool };
+}
+
+let historyFixture;
+// File-level: `after` called inside the first test that resolves the fixture would end the
+// pool when that test finishes.
+after(async () => {
+  // A fixture that failed to resolve already failed its tests and owns no pool.
+  await historyFixture?.then(
+    (fixture) => fixture.admin.end(),
+    () => {},
+  );
+});
+function migrationHistoryFixture() {
+  historyFixture ??= resolveMigrationHistoryFixture();
+  return historyFixture;
+}
+
+async function resolveMigrationHistoryFixture() {
   if (historySelectors.every((value) => value === undefined)) {
     const fixture = await ownedPostgres();
-    // Resolve the Compose service's container once: `docker exec` skips the Compose
-    // project load that each of the several hundred administrator psql calls would repeat.
+    // Resolve the Compose service's container to read its administrator credential.
     const container = (
       await runCommand(fixture, "docker", [...fixture.composeProjectArgs, "ps", "-q", "postgres"])
     ).trim();
     assert.match(container, /^[a-f0-9]{12,64}$/);
     return {
       ...fixture,
-      composeArgs: ["exec", container],
+      ...(await historyAdministrator(container, "127.0.0.1", fixture.port)),
       databasePrefix: "openclaw_ci_canonical",
     };
   }
@@ -934,23 +984,30 @@ async function migrationHistoryFixture() {
       .split("\n")
       .some((line) => line === `127.0.0.1:${port}` || line === `[::1]:${port}`),
   );
-  return { migrationUrl, port, databasePrefix, composeArgs: ["exec", container] };
+  return {
+    migrationUrl,
+    port,
+    databasePrefix,
+    ...(await historyAdministrator(container, url.hostname, port)),
+  };
 }
 
+// One simple-protocol query, so a multi-statement string runs in one implicit
+// transaction exactly as `psql -c` ran it.
 async function historyAdmin(fixture, database, sql) {
-  return runCommand(fixture, "docker", [
-    ...fixture.composeArgs,
-    "psql",
-    "-XAt",
-    "-v",
-    "ON_ERROR_STOP=1",
-    "-U",
-    "postgres",
-    "-d",
-    database,
-    "-c",
-    sql,
-  ]);
+  if (database === "postgres") {
+    await fixture.admin.query(sql);
+    return;
+  }
+  const url = new URL(fixture.adminUrl);
+  url.pathname = `/${database}`;
+  const client = new pg.Client({ connectionString: url.toString() });
+  await client.connect();
+  try {
+    await client.query(sql);
+  } finally {
+    await client.end();
+  }
 }
 
 async function historyDatabase(context, fixture, label, { schemas = true, prefix = 0 } = {}) {
@@ -1046,21 +1103,22 @@ async function installProviderCompletedHistory(db) {
   }
 }
 
-// The history cases start several hundred migration commands on a CPU-bound 2-CPU CI
-// runner, and pnpm's own startup costs about 1 s of CPU per call. Run each package.json
-// script's exact text through `sh` with this Node first on PATH, as pnpm does. The "Drizzle
-// second migration" case still runs both commands through `corepack pnpm`, every prepared CI
-// database is migrated that way, and the Helm migration Job runs the script file directly.
+// The real migration command. pnpm's own startup costs about 1 s of CPU per call, so run each
+// package.json script's exact text through `sh` with this Node first on PATH, as pnpm does.
+// The "Drizzle second migration" case still runs both commands through `corepack pnpm`,
+// every prepared CI database is migrated that way, and the Helm migration Job runs the
+// script file directly. Each refusal code and both scripts keep a command case here.
 const migrationScripts = readFile(join(repositoryRoot, "package.json"), "utf8").then(
   (text) => JSON.parse(text).scripts,
 );
 
-async function runHistoryMigration(db, mode = "development", checkOnly = false) {
+async function runHistoryCommand(db, mode = "development", ...flags) {
   const script = (await migrationScripts)[
     mode === "production" ? "db:migrate:production" : "db:migrate"
   ];
   assert.equal(typeof script, "string");
-  const args = ["-c", `${script} "$@"`, "sh", ...(checkOnly ? ["--check"] : [])];
+  const args = ["-c", `${script} "$@"`, "sh", ...flags];
+  const checkOnly = flags.includes("--check");
   try {
     const { stdout } = await execFileAsync("sh", args, {
       cwd: repositoryRoot,
@@ -1085,12 +1143,58 @@ async function runHistoryMigration(db, mode = "development", checkOnly = false) 
     if (error.code === 1 && output.includes('"code":"MIGRATION_HISTORY_UNSUPPORTED"')) {
       return { ok: false, code: "MIGRATION_HISTORY_UNSUPPORTED" };
     }
+    if (error.code === 1 && output.includes('"code":"MIGRATION_HISTORY_NOT_EMPTY"')) {
+      assert.ok(
+        output.includes("use --check to inspect migration history without applying changes"),
+      );
+      return { ok: false, code: "MIGRATION_HISTORY_NOT_EMPTY" };
+    }
     if (error.code === 1 && output.includes('"code":"MIGRATION_FAILED"')) {
       return { ok: false, code: "MIGRATION_FAILED" };
     }
     // Subprocess errors can retain connection credentials in stdout or stderr.
     // eslint-disable-next-line preserve-caught-error
     throw new Error(`Migration subprocess failed unexpectedly (code=${error.code ?? "none"}).`);
+  }
+}
+
+// The history cases migrate a few hundred databases. Run them in this process: the same
+// `migrateWithHistory` call on the same pool as `scripts/migrate-production.mjs`, with that
+// command's outcome codes. The mode only selects the script (and its NODE_ENV logging),
+// never the migration; `runHistoryCommand` covers the process contract.
+async function runHistoryMigration(db, mode = "development", ...flags) {
+  assert.ok(["development", "production"].includes(mode));
+  const [option, ...extra] = flags;
+  assert.ok(extra.length === 0 && [undefined, "--check", "--expect-empty"].includes(option));
+  const pool = await createPostgresPool(db.migrationUrl, { max: 1 });
+  try {
+    const history = await migrateWithHistory(pool, {
+      checkOnly: option === "--check",
+      expectEmpty: option === "--expect-empty",
+    });
+    return { ok: true, history };
+  } catch (error) {
+    if (error?.code === "MIGRATION_HISTORY_UNSUPPORTED") {
+      return { ok: false, code: "MIGRATION_HISTORY_UNSUPPORTED" };
+    }
+    if (error?.code === "MIGRATION_HISTORY_NOT_EMPTY") {
+      assert.ok(
+        error.message.includes("use --check to inspect migration history without applying changes"),
+      );
+      return { ok: false, code: "MIGRATION_HISTORY_NOT_EMPTY" };
+    }
+    // The command reports any other failure as MIGRATION_FAILED. Here only a PostgreSQL
+    // error (SQLSTATE, possibly wrapped by Drizzle) counts, so a test bug cannot pass as one.
+    if (
+      [error, error?.cause].some(
+        (value) => typeof value?.severity === "string" && typeof value?.code === "string",
+      )
+    ) {
+      return { ok: false, code: "MIGRATION_FAILED" };
+    }
+    throw error;
+  } finally {
+    await pool.end();
   }
 }
 
@@ -1131,7 +1235,7 @@ async function assertHistoryRefused(db) {
     ["development", false],
     ["production", false],
   ]) {
-    assert.deepEqual(await runHistoryMigration(db, mode, checkOnly), {
+    assert.deepEqual(await runHistoryMigration(db, mode, ...(checkOnly ? ["--check"] : [])), {
       ok: false,
       code: "MIGRATION_HISTORY_UNSUPPORTED",
     });
@@ -1156,6 +1260,15 @@ async function assertCompletedHistory(db, previous = []) {
     expectedEntries.map(({ sha256, when }) => [sha256, when]),
   );
   assert.equal(catalogDigest(await migrationCatalog(db.migrator)), manifest.catalogs.completed);
+  // Pre-existing Agents receive one empty owned policy and keep delegated editing disabled.
+  const policies = await db.app.query(`SELECT bool_and(
+    NOT agent.sandbox_policy_editing AND policy.namespace_id=agent.namespace_id
+    AND policy.version=1 AND policy.document->'additions'='[]'::jsonb
+  ) AS valid, count(policy.id)::integer AS policies, count(agent.id)::integer AS agents
+  FROM occ.agents agent LEFT JOIN occ.sandbox_policies policy ON policy.agent_id=agent.id`);
+  assert.notEqual(policies.rows[0].valid, false);
+  assert.equal(policies.rows[0].policies, policies.rows[0].agents);
+
   assert.equal(
     (
       await db.app.query(
@@ -1178,7 +1291,9 @@ async function assertCompletedHistory(db, previous = []) {
     WHERE n.nspname='occ' AND p.prosecdef ORDER BY identity`)
     ).rows,
     [
+      ["occ.create_agent_sandbox_policy()", false, "search_path=pg_catalog, occ"],
       ["occ.finalize_agent_deletion(text,text,text,uuid)", true],
+      ["occ.remove_sandbox_policy_access()", false, "search_path=pg_catalog, occ"],
       ["occ.retry_failed_agent_deletion(text,text,text,text)", true],
       ["occ.retry_failed_namespace_deletion(text,text,text)", true],
       // The Agent trigger keeps the credential-source join table exact; occ_app cannot write it.
@@ -1186,10 +1301,10 @@ async function assertCompletedHistory(db, previous = []) {
       ["occ.validate_access_binding_scope()", false],
       ["occ.validate_group_membership()", false],
       ["occ.validate_restriction_scope()", false],
-    ].map(([identity, app_execute]) => ({
+    ].map(([identity, app_execute, searchPath = "search_path=pg_catalog, occ, pg_temp"]) => ({
       identity,
       owner: "occ_migrator",
-      proconfig: ["search_path=pg_catalog, occ, pg_temp"],
+      proconfig: [searchPath],
       app_execute,
     })),
   );
@@ -1553,6 +1668,7 @@ async function canonicalData(db) {
               "harness_auth_credential_source_id",
               "plugin_approvers",
               "credential_sources",
+              "sandbox_policy_editing",
             ]
           : table === "controller_work"
             ? ["work_kind"]
@@ -1570,6 +1686,33 @@ async function canonicalData(db) {
 }
 
 test(
+  "First installation requires empty migration history under the migration lock",
+  requiresHistoryPostgres,
+  async (context) => {
+    const fixture = await migrationHistoryFixture();
+    const db = await historyDatabase(context, fixture, "first_install");
+    // The real production command: its exit code, stdout outcome and refusal message.
+    const firstInstall = () => runHistoryCommand(db, "production", "--expect-empty");
+    const refused = { ok: false, code: "MIGRATION_HISTORY_NOT_EMPTY" };
+    // Concurrent callers both intend a first installation. Only the lock winner may migrate.
+    const results = await Promise.all([firstInstall(), firstInstall()]);
+    assert.deepEqual(
+      results.sort((a, b) => Number(b.ok) - Number(a.ok)),
+      [{ ok: true, history: "empty" }, refused],
+    );
+    await assertCompletedHistory(db);
+
+    const before = await historySnapshot(db);
+    assert.deepEqual(await firstInstall(), refused);
+    assert.deepEqual(await historySnapshot(db), before);
+    assert.deepEqual(await runHistoryCommand(db, "production", "--check"), {
+      ok: true,
+      history: "completed",
+    });
+  },
+);
+
+test(
   "Canonical migration commands preserve main data and serialize fresh/repeat runners",
   concurrentHistoryPostgres,
   async (context) => {
@@ -1580,15 +1723,15 @@ test(
         async (child) => {
           const db = await historyDatabase(child, fixture, "fresh", { schemas });
           const before = await historySnapshot(db);
-          assert.deepEqual(await runHistoryMigration(db, "development", true), {
+          assert.deepEqual(await runHistoryMigration(db, "development", "--check"), {
             ok: true,
             history: "empty",
           });
           assert.deepEqual(await historySnapshot(db), before);
-          const results = await Promise.all([
-            runHistoryMigration(db),
-            runHistoryMigration(db, "production"),
-          ]);
+          // Two real processes (both scripts) race for the migration lock once; the
+          // owner-only case races in-process connections.
+          const migrate = schemas ? runHistoryMigration : runHistoryCommand;
+          const results = await Promise.all([migrate(db), migrate(db, "production")]);
           assert.deepEqual(
             results.map((result) => result.ok),
             [true, true],
@@ -1631,13 +1774,21 @@ test(
       [48, "preCodexPatSources"],
       [49, "preAgentCredentialSources"],
       [50, "preCredentialWithdrawalRequester"],
+      [51, "preProvisioningDeploymentOutcome"],
+      [52, "preComputePreparationFailureEvidence"],
+      [53, "preCredentialSourcePat"],
+      [54, "preComputeRevisionAdmission"],
+      [55, "preHeldAuthenticationSession"],
+      [56, "preCanonicalHarnessAuth"],
+      [57, "preSandboxPolicies"],
+      [58, "preSandboxPolicyAdministrator"],
     ]) {
       void context.test(`populated canonical ${history}`, async (child) => {
         const db = await historyDatabase(child, fixture, "main", { prefix });
         await seedCanonicalData(db, { preset: prefix >= 25 });
         const before = await canonicalData(db);
         const receipts = await historyReceipts(db.migrator);
-        assert.deepEqual(await runHistoryMigration(db, "production", true), {
+        assert.deepEqual(await runHistoryMigration(db, "production", "--check"), {
           ok: true,
           history,
         });
@@ -1645,6 +1796,19 @@ test(
         await assertCompletedHistory(db, receipts);
         assert.deepEqual(await canonicalData(db), before);
         await assertUpgradedAuthentication(db);
+        if (prefix === 55) {
+          const upgradedReceipts = await historyReceipts(db.migrator);
+          const sessions = await db.app.query("SELECT count(*)::integer AS count FROM occ.session");
+          child.diagnostic(
+            JSON.stringify({
+              scenario: "previous-schema-upgrade",
+              oldReceipts: receipts.length,
+              newReceipts: upgradedReceipts.length,
+              retainedSessions: sessions.rows[0].count,
+              preservedStoredRows: true,
+            }),
+          );
+        }
         // Main's existing IAM DELETE compatibility grant belongs to its later controlled-writer transition.
         assert.equal(
           (
@@ -1656,6 +1820,116 @@ test(
         );
       });
     }
+  },
+);
+
+test(
+  "External ChatGPT migration rejects retired OAuth state and admits only source metadata",
+  requiresHistoryPostgres,
+  async (context) => {
+    const fixture = await migrationHistoryFixture();
+    const db = await historyDatabase(context, fixture, "externalchatgpt", { prefix: 56 });
+    const namespaceId = await seedCanonicalData(db);
+    const sourceId = `cs_${randomUUID()}`;
+    await db.app.query(
+      `INSERT INTO occ.credential_sources(id,namespace_id,name,type,config,driver_id,state,created_at)
+       VALUES($1,$2,'External ChatGPT','chatgpt','{}','external-gateway','ready',now())`,
+      [sourceId, namespaceId],
+    );
+    const binding = {
+      method: "credential_source",
+      sourceId,
+      credentialGatewayId: "external-gateway",
+      sourceType: "chatgpt",
+      loginMode: "chatgptAuthTokens",
+    };
+    let revisionNumber = 2;
+    const insertSnapshot = (auth) =>
+      db.app.query(
+        `INSERT INTO occ.agent_revisions(id,namespace_id,agent_id,revision_number,admitted_spec,backend_id,admitted_at)
+         SELECT $2,namespace_id,agent_id,$3,
+           jsonb_set(admitted_spec,'{harness_auth}',$4::jsonb) || '{"sandbox_driver_id":"external-sandbox"}'::jsonb,
+           backend_id,now()
+         FROM occ.agent_revisions WHERE namespace_id=$1 AND revision_number=1
+         RETURNING admitted_spec->'harness_auth' AS auth`,
+        [namespaceId, `rev_${randomUUID()}`, revisionNumber++, JSON.stringify(auth)],
+      );
+    const invalidSnapshot = (error) =>
+      error.code === "23514" && error.constraint === "agent_revisions_admitted_snapshot";
+
+    // A valid PAT snapshot from main must survive the new function replacement.
+    const patSourceId = `cs_${randomUUID()}`;
+    await db.app.query(
+      `INSERT INTO occ.credential_sources(id,namespace_id,name,type,config,driver_id,state,created_at)
+       VALUES($1,$2,'Existing PAT','codex-pat','{}','external-gateway','ready',now())`,
+      [patSourceId, namespaceId],
+    );
+    const patBinding = {
+      ...binding,
+      sourceId: patSourceId,
+      sourceType: "codex-pat",
+      loginMode: "codex_pat",
+    };
+    assert.deepEqual((await insertSnapshot(patBinding)).rows, [{ auth: patBinding }]);
+
+    // Exercise the actual old CHECK constraint first, not the application validator.
+    await assert.rejects(insertSnapshot(binding), invalidSnapshot);
+    const secretId = `sec_${randomUUID()}`;
+    await db.app.query(
+      `INSERT INTO occ.secrets(id,namespace_id,name,driver_id,backend_namespace_name,backend_name,backend_key,backend_uid,created_at)
+       VALUES($1,$2,'Legacy OAuth','secrets','fixture','oauth-source','value',$3,now())`,
+      [secretId, namespaceId, randomUUID()],
+    );
+    const legacyBinding = {
+      method: "oauth",
+      source: { kind: "secret", namespaceId, id: secretId },
+    };
+    await db.app.query("UPDATE occ.agents SET harness_auth=$2::jsonb WHERE namespace_id=$1", [
+      namespaceId,
+      JSON.stringify(legacyBinding),
+    ]);
+    // A preexisting native OAuth binding blocks the new grammar atomically; the
+    // migration cannot silently relabel a Secret as a gateway-owned connection.
+    const beforeRefusal = await historySnapshot(db);
+    // The real command reports a failed migration transaction as MIGRATION_FAILED.
+    assert.deepEqual(await runHistoryCommand(db), { ok: false, code: "MIGRATION_FAILED" });
+    assert.deepEqual(await historySnapshot(db), beforeRefusal);
+    assert.deepEqual(
+      (
+        await db.app.query("SELECT harness_auth FROM occ.agents WHERE namespace_id=$1", [
+          namespaceId,
+        ])
+      ).rows,
+      [{ harness_auth: legacyBinding }],
+    );
+    await db.app.query("UPDATE occ.agents SET harness_auth=NULL WHERE namespace_id=$1", [
+      namespaceId,
+    ]);
+    const receipts = await historyReceipts(db.migrator);
+    assert.deepEqual(await runHistoryMigration(db), {
+      ok: true,
+      history: "preCanonicalHarnessAuth",
+    });
+    await assertCompletedHistory(db, receipts);
+    assert.deepEqual((await insertSnapshot(binding)).rows, [{ auth: binding }]);
+    const apiKey = { ...binding, loginMode: "api_key" };
+    assert.deepEqual((await insertSnapshot(apiKey)).rows, [{ auth: apiKey }]);
+    assert.deepEqual(
+      (
+        await db.app.query(
+          "SELECT admitted_spec->'harness_auth' AS auth FROM occ.agent_revisions WHERE admitted_spec #>> '{harness_auth,sourceId}'=$1",
+          [patSourceId],
+        )
+      ).rows,
+      [{ auth: patBinding }],
+    );
+    assert.deepEqual((await insertSnapshot(patBinding)).rows, [{ auth: patBinding }]);
+    // Only the admitted mode expands: unknown modes and credential payloads remain invalid.
+    await assert.rejects(insertSnapshot({ ...binding, loginMode: "unknown" }), invalidSnapshot);
+    await assert.rejects(
+      insertSnapshot({ ...binding, accessTokenPlaceholder: "synthetic-placeholder" }),
+      invalidSnapshot,
+    );
   },
 );
 
@@ -1699,7 +1973,7 @@ test(
       )
     ).rows;
     const receipts = await historyReceipts(db.migrator);
-    assert.deepEqual(await runHistoryMigration(db, "production", true), {
+    assert.deepEqual(await runHistoryMigration(db, "production", "--check"), {
       ok: true,
       history: "repositoryCredentials",
     });
@@ -1738,7 +2012,7 @@ test(
     const seeded = await seedProviderCompletedData(db);
     const receipts = await historyReceipts(db.migrator);
     assert.equal(receipts.length, 31);
-    assert.deepEqual(await runHistoryMigration(db, "production", true), {
+    assert.deepEqual(await runHistoryMigration(db, "production", "--check"), {
       ok: true,
       history: "providerCompleted",
     });
@@ -1852,7 +2126,7 @@ test(
       ).rows,
       [{ table_name: "account", column_name: "provider_id" }],
     );
-    assert.deepEqual(await runHistoryMigration(db, "production", true), {
+    assert.deepEqual(await runHistoryMigration(db, "production", "--check"), {
       ok: true,
       history: "preCodexPatSources",
     });
@@ -1890,6 +2164,14 @@ test(
       [48, "preCodexPatSources"],
       [49, "preAgentCredentialSources"],
       [50, "preCredentialWithdrawalRequester"],
+      [51, "preProvisioningDeploymentOutcome"],
+      [52, "preComputePreparationFailureEvidence"],
+      [53, "preCredentialSourcePat"],
+      [54, "preComputeRevisionAdmission"],
+      [55, "preHeldAuthenticationSession"],
+      [56, "preCanonicalHarnessAuth"],
+      [57, "preSandboxPolicies"],
+      [58, "preSandboxPolicyAdministrator"],
     ]) {
       void context.test(history, async (child) => {
         const db = await historyDatabase(child, fixture, "providercontinuation");
@@ -1898,7 +2180,7 @@ test(
         await installCanonicalPrefix(db, prefix);
         const receipts = await historyReceipts(db.migrator);
         assert.equal(receipts.length, prefix);
-        assert.deepEqual(await runHistoryMigration(db, "production", true), {
+        assert.deepEqual(await runHistoryMigration(db, "production", "--check"), {
           ok: true,
           history,
         });
@@ -1969,6 +2251,13 @@ test(
       [48, "preCodexPatSources"],
       [49, "preAgentCredentialSources"],
       [50, "preCredentialWithdrawalRequester"],
+      [51, "preProvisioningDeploymentOutcome"],
+      [52, "preComputePreparationFailureEvidence"],
+      [53, "preCredentialSourcePat"],
+      [54, "preComputeRevisionAdmission"],
+      [55, "preHeldAuthenticationSession"],
+      [56, "preCanonicalHarnessAuth"],
+      [57, "preSandboxPolicies"],
     ]) {
       void context.test(`prefix ${prefix} transaction`, async (child) => {
         const db = await historyDatabase(child, fixture, "rollback", { prefix });
@@ -1980,11 +2269,27 @@ test(
         // A database-local event trigger aborts the real final DDL. Drizzle must
         // roll back every preceding SQL statement and receipt in that transaction.
         // 0051's final GRANT runs after it dropped both withdrawal triggers.
+        // Abort 0056 after its function was created, before the deferred trigger exists.
+        // 0057 replaces the Harness validator, so reject that function replacement.
+        const rollbackTag = [
+          [57, "CREATE TABLE"],
+          [56, "CREATE FUNCTION"],
+          [55, "CREATE TRIGGER"],
+          [54, "ALTER TABLE"],
+          [53, "CREATE FUNCTION"],
+          [50, "GRANT"],
+          [41, "ALTER TABLE"],
+          [38, "CREATE FUNCTION"],
+          [36, "CREATE INDEX"],
+          [31, "ALTER TABLE"],
+          [27, "CREATE FUNCTION"],
+          [0, "ALTER FUNCTION"],
+        ].find(([minimum]) => prefix >= minimum)[1];
         await historyAdmin(
           db,
           db.name,
           `CREATE FUNCTION public.reject_migration_ddl() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'migration rollback fixture' USING ERRCODE='55000'; END $$;
-        CREATE EVENT TRIGGER reject_migration_ddl ON ddl_command_start WHEN TAG IN ('${prefix >= 50 ? "GRANT" : prefix >= 41 ? "ALTER TABLE" : prefix >= 38 ? "CREATE FUNCTION" : prefix >= 36 ? "CREATE INDEX" : prefix >= 31 ? "ALTER TABLE" : prefix >= 27 ? "CREATE FUNCTION" : "ALTER FUNCTION"}') EXECUTE FUNCTION public.reject_migration_ddl()`,
+        CREATE EVENT TRIGGER reject_migration_ddl ON ddl_command_start WHEN TAG IN ('${rollbackTag}') EXECUTE FUNCTION public.reject_migration_ddl()`,
         );
         assert.deepEqual(await runHistoryMigration(db), { ok: false, code: "MIGRATION_FAILED" });
         assert.deepEqual(await historyReceipts(db.migrator), before.receipts);
@@ -2111,7 +2416,8 @@ test(
       const url = new URL(db.migrationUrl);
       url.username = "occ_app";
       url.password = "occ-app-local";
-      assert.deepEqual(await runHistoryMigration({ ...db, migrationUrl: url.toString() }), {
+      // The real command refuses an unsupported history with exit code 1.
+      assert.deepEqual(await runHistoryCommand({ ...db, migrationUrl: url.toString() }), {
         ok: false,
         code: "MIGRATION_HISTORY_UNSUPPORTED",
       });
@@ -2143,7 +2449,7 @@ test(
             await assertCompletedHistory(db);
           }
           const data = await canonicalData(db);
-          assert.deepEqual(await runHistoryMigration(db, "development", true), {
+          assert.deepEqual(await runHistoryMigration(db, "development", "--check"), {
             ok: true,
             history,
           });

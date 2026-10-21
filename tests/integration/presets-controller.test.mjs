@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,6 +25,10 @@ import { createConsoleAppFixture } from "../helpers/console-app.mjs";
 import { bindRole, grantRole } from "../helpers/iam-grants.mjs";
 import { createInstallationDriverConfiguration } from "../helpers/installation-driver-configuration.mjs";
 import { loadInstallationFile } from "../helpers/installation-file.mjs";
+import {
+  assertWriteAuthorizationDenial,
+  partialWrite,
+} from "../helpers/partial-write-authorization.mjs";
 
 async function createFixture(t, options = {}) {
   const root = await mkdtemp(join(tmpdir(), "occ-presets-"));
@@ -65,8 +68,22 @@ const iamOf = (fixture) => fixture.controller.selectDriver("iam", "console-nativ
 const collection = (namespaceId) => `/namespaces/${namespaceId}/presets`;
 const presetPath = (namespaceId, presetId) => `${collection(namespaceId)}/${presetId}`;
 const agentsPath = (namespaceId) => `/namespaces/${namespaceId}/agents`;
+// The list route returns summaries without templates (finding 1323).
 const listPresets = async (fixture, namespaceId) =>
   (await fixture.request("GET", collection(namespaceId))).data;
+const presetSummary = ({ id, namespaceId, name, createdAt }) => ({
+  id,
+  namespaceId,
+  name,
+  createdAt,
+});
+// Each listed Preset with its template, read one by one as clients do.
+const listPresetDocuments = async (fixture, namespaceId) =>
+  Promise.all(
+    (await listPresets(fixture, namespaceId)).map(
+      async ({ id }) => (await fixture.request("GET", presetPath(namespaceId, id))).data,
+    ),
+  );
 const presetNames = async (fixture, namespaceId) =>
   (await listPresets(fixture, namespaceId)).map((preset) => preset.name).sort();
 const readPreset = (fixture, namespaceId, presetId) =>
@@ -212,56 +229,16 @@ function failPresetAuthorization(t, iam, action) {
   });
 }
 
-// Sends a write's head and its first 64 KiB, declaring a body of `declaredBytes`, and never the
-// rest. Resolves with the response, or with null if the controller is still waiting for the body
-// after the deadline (it would buffer it before answering). A correct controller answers at once,
-// so the deadline is generous: it only bounds how long a real failure takes to report.
-function partialWrite(fixture, method, path, session, declaredBytes) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const settle = (callback, value) => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timer);
-        request.destroy();
-        callback(value);
-      }
-    };
-    const request = httpRequest(new URL(path, fixture.origin), {
-      method,
-      headers: {
-        ...authenticatedHeaders(session, { origin: fixture.origin }),
-        "content-type": "application/json",
-        "content-length": String(declaredBytes),
-      },
-    });
-    const timer = setTimeout(() => settle(resolve, null), 15_000);
-    request.on("response", (response) => {
-      const chunks = [];
-      response.on("data", (chunk) => chunks.push(chunk));
-      response.on("end", () => {
-        try {
-          const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-          settle(resolve, { status: response.statusCode, body });
-        } catch (error) {
-          settle(reject, error);
-        }
-      });
-      response.on("error", (error) => settle(reject, error));
-    });
-    request.on("error", (error) => settle(reject, error));
-    request.write(
-      `{"name":"Unread","template":{"variables":{"guidance":{"type":"string","default":"${"x".repeat(64 * 1024)}`,
-    );
-  });
-}
-
 // Installs a shipped standard Preset and reads it back from the catalog, as the console chooser does.
 async function installFromCatalog(fixture, namespaceId, file) {
   const { artifact, installed } = await installShipped(fixture, namespaceId, file);
   const catalog = await fixture.request("GET", collection(namespaceId));
   assert.equal(catalog.status, 200);
-  return { artifact, installed, preset: catalog.data.find(({ id }) => id === installed.data.id) };
+  const listed = catalog.data.find(({ id }) => id === installed.data.id);
+  // The catalog lists a summary; the template comes from the exact Preset.
+  assert.deepEqual(listed, presetSummary(installed.data));
+  const preset = (await fixture.request("GET", presetPath(namespaceId, listed.id))).data;
+  return { artifact, installed, preset };
 }
 
 // Creates a rendered standard Preset's Configuration and Agent with a same-Namespace model key,
@@ -519,26 +496,23 @@ describe("Presets", { concurrency: 2 }, () => {
       });
       assert.equal(small.status, 403, `${method}: ${JSON.stringify(small.body)}`);
       assert.deepEqual(small.body.error, forbidden, method);
-      const denials = () =>
-        fixture.audit.events.filter(
-          (event) =>
-            event.kind === "authorization_denial" &&
-            event.actor?.principalId === memberId &&
-            event.action === action,
-        );
-      const before = denials().length;
-      const refused = await partialWrite(fixture, method, path, session, declaredBytes);
+      const auditStart = fixture.audit.events.length;
+      const refused = await partialWrite({
+        origin: fixture.origin,
+        method,
+        path,
+        session,
+        declaredBytes,
+        bodyPrefix:
+          '{"name":"Unread","template":{"variables":{"guidance":{"type":"string","default":"',
+      });
       assert.notEqual(refused, null, `${method}: the controller waited for the unread body`);
       assert.equal(refused.status, 403, `${method}: ${JSON.stringify(refused.body)}`);
       assert.deepEqual(refused.body.error, forbidden, method);
       // The refusal keeps its audit row, naming the exact grant the write itself checks.
-      const recorded = denials().slice(before);
-      assert.equal(recorded.length, 1, method);
-      assert.equal(recorded[0].reasonCode, "AUTHORIZATION_DENIED", method);
-      assert.deepEqual(recorded[0].resource, target, method);
-      assert.deepEqual(
-        recorded[0].authorization,
-        { principalId: memberId, action: grant, resource: target },
+      assertWriteAuthorizationDenial(
+        fixture.audit.events.slice(auditStart),
+        { principalId: memberId, action, grant, resource: target },
         method,
       );
     }
@@ -588,7 +562,7 @@ describe("Presets", { concurrency: 2 }, () => {
       assert.equal(fixture.policy.bindings.includes(writer), false, method);
       fixture.policy.bindings.push(writer);
     }
-    assert.deepEqual(await listPresets(fixture, namespace.id), [existing]);
+    assert.deepEqual(await listPresets(fixture, namespace.id), [presetSummary(existing)]);
   });
 
   test("Preset variables create independent ordinary Agent drafts that survive template replacement and deletion", async (t) => {
@@ -803,6 +777,14 @@ describe("Presets", { concurrency: 2 }, () => {
     const fixture = await shared();
     const namespace = await fixture.createNamespace("Preset errors", { ready: true });
     const contract = "The request does not match the operation contract:";
+    const openaiModel = {
+      agents: {
+        defaults: {
+          model: "openai/gpt-4.1",
+          models: { "openai/gpt-4.1": { agentRuntime: { id: "openclaw" } } },
+        },
+      },
+    };
     const unsupportedType = `${contract} body /template/variables/model/type has an unsupported value (expected one of "string", "number", "boolean", "password").`;
     // Each rejection names one field and what it accepts, so a CLI or API user can fix it directly.
     const cases = [
@@ -838,6 +820,44 @@ describe("Presets", { concurrency: 2 }, () => {
         { variables: { model: { type: "number", extra: 1 } } },
         `${contract} body /template/variables/model/extra is not an accepted field.`,
         [{ path: "/template/variables/model/extra", code: "UNKNOWN_FIELD" }],
+      ], // Kubernetes Compute's topology-independent rules refuse the rendered values with the
+      // Configuration save message (finding 1116), not at the first deployment.
+      [
+        {
+          configuration: {
+            values: { ...openaiModel, channels: { discord: { enabled: true } } },
+          },
+        },
+        "Configuration setting channels.discord is not a supported channel: use slack or msteams, or set its enabled to false.",
+      ],
+      [
+        {
+          configuration: {
+            values: {
+              ...openaiModel,
+              env: { vars: { ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}" } },
+            },
+          },
+        },
+        "Configuration setting env.vars.ANTHROPIC_API_KEY must not be set: the Agent's Harness authentication binding owns model provider environment.",
+      ],
+      // A literal both rule sets refuse gets the Compute message, as on Configuration save.
+      [
+        {
+          configuration: {
+            values: {
+              ...openaiModel,
+              models: {
+                providers: {
+                  openai: {
+                    request: { auth: { mode: "authorization-bearer", token: "sk-literal" } },
+                  },
+                },
+              },
+            },
+          },
+        },
+        `Configuration setting models.providers.openai.request.auth must be unset or {mode: "provider-default"}: model credentials come from the Agent's Harness authentication binding.`,
       ],
     ];
     for (const [template, message, details] of cases) {
@@ -879,7 +899,6 @@ describe("Presets", { concurrency: 2 }, () => {
           models: {
             providers: {
               codex: {
-                apiKey: { source: "env", provider: "default", id: "OPENAI_API_KEY" },
                 models: [{ id: "{{ vars.model }}", name: "{{ vars.model }}" }],
               },
             },
@@ -1120,8 +1139,10 @@ describe("Presets", { concurrency: 2 }, () => {
     assert.deepEqual(configuration.data.values.gateway.auth, { password: gatewayPassword });
   });
 
-  test("SWE Agent Preset defaults to Astra and reuses an existing service-account Secret", async () => {
-    const fixture = await shared();
+  test("SWE Agent Preset defaults to Astra and reuses an existing service-account Secret", async (t) => {
+    // The SWE Preset enables Slack, which Agent save refuses without an Installation channel
+    // runtime, as deployment does.
+    const fixture = await createFixture(t, { channelRuntime: true });
     const namespace = await fixture.createNamespace("SWE Agent service account", { ready: true });
     const serviceAccount = await fixture.createSecret(
       namespace.id,
@@ -1169,7 +1190,22 @@ describe("Presets", { concurrency: 2 }, () => {
     assert.equal(retained.status, 200, JSON.stringify(retained.body));
     assert.deepEqual(retained.data.template, originalTemplate);
 
-    const configuration = await createAgentConfiguration(fixture, namespace.id, rendered);
+    // The channel editor binds the Slack tokens before the Agent is saved; Agent save refuses
+    // Slack references without bindings, as deployment does.
+    const slackSecrets = [
+      await fixture.createSecret(namespace.id, "SWE Slack app token", "synthetic-slack-app"),
+      await fixture.createSecret(namespace.id, "SWE Slack bot token", "synthetic-slack-bot"),
+    ];
+    const configuration = await createAgentConfiguration(fixture, namespace.id, {
+      ...rendered,
+      configuration: {
+        ...rendered.configuration,
+        secretBindings: {
+          SLACK_APP_TOKEN: { source: slackSecrets[0].ref },
+          SLACK_BOT_TOKEN: { source: slackSecrets[1].ref },
+        },
+      },
+    });
     assert.deepEqual(configuration.data.values.channels.slack.replyToModeByChatType, {
       channel: "all",
     });
@@ -1179,7 +1215,8 @@ describe("Presets", { concurrency: 2 }, () => {
       (await fixture.request("GET", `/namespaces/${namespace.id}/secrets`)).data.map(
         (secret) => secret.id,
       );
-    assert.deepEqual(await secretIds(), [serviceAccount.id]);
+    const existingSecretIds = [serviceAccount.id, ...slackSecrets.map((secret) => secret.id)];
+    assert.deepEqual((await secretIds()).sort(), existingSecretIds.toSorted());
     const created = [];
     for (const name of ["SWE existing service account", "SWE existing service account reuse"]) {
       const agent = await postAgent(fixture, namespace.id, rendered, configuration, { name });
@@ -1191,7 +1228,7 @@ describe("Presets", { concurrency: 2 }, () => {
       });
       created.push(agent);
     }
-    assert.deepEqual(await secretIds(), [serviceAccount.id]);
+    assert.deepEqual((await secretIds()).sort(), existingSecretIds.toSorted());
     for (const body of [installed.body, created[0].body]) {
       assert.equal(
         JSON.stringify(body).includes("synthetic-existing-service-account-token"),
@@ -1253,7 +1290,8 @@ describe("Presets", { concurrency: 2 }, () => {
       "Standard OpenClaw",
     ].sort();
     assert.deepEqual(list.data.map((preset) => preset.name).sort(), defaultNames);
-    const named = (name) => list.data.find((preset) => preset.name === name);
+    const documents = await listPresetDocuments(fixture, namespace.id);
+    const named = (name) => documents.find((preset) => preset.name === name);
     assert.equal(named("Standard Codex").template.variables.modelSecret.type, "password");
     const customDefault = named(customPreset.name);
     assert.ok(customDefault, `missing ${customPreset.name}`);
@@ -1486,7 +1524,7 @@ describe("Presets", { concurrency: 2 }, () => {
     const principal = fixture.admin;
     const byName = async (namespaceId) =>
       Object.fromEntries(
-        (await listPresets(fixture, namespaceId)).map((preset) => [preset.name, preset]),
+        (await listPresetDocuments(fixture, namespaceId)).map((preset) => [preset.name, preset]),
       );
     // What the running release seeds into a new Namespace is the refresh target.
     const fresh = await fixture.createNamespace("Seeded by this release", { ready: true });

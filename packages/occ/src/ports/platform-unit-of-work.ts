@@ -8,11 +8,13 @@ export function bindPlatformUnitOfWork(
   lifetime: RepositoryTransactionLifetime,
 ): PlatformUnitOfWork {
   return Object.freeze({
+    sandboxPolicies: bindRepository(repositories.sandboxPolicies, lifetime, ["find", "save"]),
     installations: bindRepository(repositories.installations, lifetime, [
       "findInstallation",
       "getInstallation",
       "createInstallation",
       "holdPrincipalAccount",
+      "holdAuthenticationSession",
     ]),
     namespaces: bindRepository(repositories.namespaces, lifetime, [
       "findNamespace",
@@ -39,6 +41,7 @@ export function bindPlatformUnitOfWork(
     presets: bindRepository(repositories.presets, lifetime, [
       "findPreset",
       "listPresets",
+      "listPresetSummaries",
       "createPreset",
       "lockPreset",
       "updatePreset",
@@ -93,9 +96,11 @@ export function bindPlatformUnitOfWork(
       "listAgentsForBrowsing",
       "findAgent",
       "listAgents",
+      "listAgentReferences",
       "createAgent",
       "lockAgent",
       "updateConfiguration",
+      "setSandboxPolicyEditing",
       "compareAndSetActiveRevision",
       "compareAndClearActiveRevision",
       "transitionAgentDesiredRuntimeState",
@@ -106,6 +111,8 @@ export function bindPlatformUnitOfWork(
       "listRevisionsForBrowsing",
       "findRevision",
       "listRevisions",
+      "listRevisionMetadata",
+      "pageRevisionSummaries",
       "createRevision",
     ]),
     iamPolicy: bindRepository(repositories.iamPolicy, lifetime, [
@@ -149,6 +156,7 @@ export function bindPlatformUnitOfWork(
       "settleEffect",
       "cancel",
       "cancelByAgent",
+      "settleAbandonedEffect",
       "retryByWorkId",
       "releaseConfiguration",
     ]),

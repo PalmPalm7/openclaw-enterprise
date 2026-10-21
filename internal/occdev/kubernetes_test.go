@@ -1,8 +1,6 @@
 package occdev
 
 import (
-	"archive/tar"
-	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -205,21 +203,9 @@ func TestImportDevelopmentImagePreservesTaggedImagesAndReleasesArchives(t *testi
 			}
 			archive := filepath.Join(state.directory, "development-import.tar")
 			fixture := filepath.Join(t.TempDir(), "engine-export.tar")
-			var archiveBytes bytes.Buffer
-			writer := tar.NewWriter(&archiveBytes)
-			manifest := []byte("[]\n")
-			if err := writer.WriteHeader(&tar.Header{Name: "manifest.json", Mode: 0o600, Size: int64(len(manifest))}); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := writer.Write(manifest); err != nil {
-				t.Fatal(err)
-			}
-			if err := writer.Close(); err != nil {
-				t.Fatal(err)
-			}
-			exportedBytes := archiveBytes.Bytes()
+			exportedBytes := []byte("complete image export")
 			if tc.saveFailure {
-				exportedBytes = exportedBytes[:64]
+				exportedBytes = []byte("partial export")
 			}
 			if err := os.WriteFile(fixture, exportedBytes, 0o600); err != nil {
 				t.Fatal(err)
